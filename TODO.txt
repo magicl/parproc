@@ -1,0 +1,13 @@
+* Clean up code
+* Switch to MIT license
+* Add read-the-docs
+* Add github help page
+* Add github action tests, running on python 3.6 -> 3.12
+
+* tests/proto.py: Test wait on locks
+* tests/proto.py: Implement and test timeouts for both wait functions. Verify that TIMEOUT error is set on failure
+
+# tests/simple.py: Create test that sets up 4 procs that are not supposed to run, but with some deps. trigger one of them, and verify that only the ones with deps are executed
+# tests/simple.py: Only execute procs that either have 'now=True' or have another task with a dependency to them!
+# tests/simple.py: Add state to proc (idle, ready, complete, failed)
+# tests/simple.py: Add timeout option to each proc

@@ -1,0 +1,6 @@
+parameterized
+pre-commit
+setuptools
+wheel
+twine
+build
