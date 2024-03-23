@@ -3,7 +3,7 @@
 
 import time
 
-import parproc as pp
+import parproc as pp  # pylint: disable=import-error
 
 print('Multiple concurrent processes, where a couple are failing at various times')
 
@@ -39,5 +39,5 @@ def func4(context):
 
 try:
     pp.wait_for_all()
-except:  # pylint: disable=bare-except
+except:  # pylint: disable=bare-except # nosec try_except_pass
     pass

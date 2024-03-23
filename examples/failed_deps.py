@@ -3,7 +3,7 @@
 
 import time
 
-import parproc as pp
+import parproc as pp  # pylint: disable=import-error
 
 print('Shows behavior when dependencies fail')
 
@@ -62,5 +62,5 @@ def x_a_b(context):
 
 try:
     pp.wait_for_all()
-except:  # pylint: disable=bare-except
+except:  # pylint: disable=bare-except # nosec try_except_pass
     pass
