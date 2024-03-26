@@ -52,7 +52,7 @@ repos:
       #args: ["--disable=all", "--enable=F,E,unreachable,duplicate-key,unused-variable,unused-import,unnecessary-semicolon,global-variable-not-assigned,unused-variable,binary-op-exception,bad-format-string,anomalous-backslash-in-s
 
 - repo: https://github.com/asottile/pyupgrade
-  rev: v3.15.1
+  rev: v3.15.2
   hooks:
     - id: pyupgrade
       args: ['--py312-plus']
@@ -63,5 +63,5 @@ repos:
   - id: bandit
 
 
-default_language_version:
-  python: python3.12
+#default_language_version:
+#  python: python3.12
