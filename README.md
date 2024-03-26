@@ -1,3 +1,6 @@
+![Python package workflow status](https://github.com/magicl/parproc/actions/workflows/python-package.yml/badge.svg)
+
+
 PARPROC
 =======
 
