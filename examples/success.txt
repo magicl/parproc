@@ -11,29 +11,25 @@ print('Multiple concurrent processes, where a couple are failing at various time
 @pp.Proc(now=True)
 def func0(context):
     time.sleep(1)
-    print('Internal error caused by X')
-    raise Exception('Failure')  # pylint: disable=broad-exception-raised
 
 
 @pp.Proc(now=True)
 def func1(context):
     time.sleep(3)
-    print('Another internal error message')
-    raise Exception('Failure')  # pylint: disable=broad-exception-raised
 
 
 @pp.Proc(now=True)
-def func2(context):
+def func2(context, deps=['func0', 'func1']):
     time.sleep(2)
 
 
 @pp.Proc(now=True)
-def func3(context):
+def func3(context, deps=['func2']):
     time.sleep(1)
 
 
 @pp.Proc(now=True)
-def func4(context):
+def func4(context, deps=['func2', 'func3']):
     time.sleep(5)
 
 
