@@ -15,6 +15,7 @@ def func0(context):
 
 @pp.Proc(now=True)
 def func1(context):
+    print('some output')
     time.sleep(3)
 
 
