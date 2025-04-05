@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-# pylint: disable=unused-argument
+# pylint: disable=unused-argument,duplicate-code
 
 import time
 
@@ -19,18 +19,18 @@ def func1(context):
     time.sleep(3)
 
 
-@pp.Proc(now=True)
-def func2(context, deps=['func0', 'func1']):
+@pp.Proc(now=True, deps=['func0', 'func1'])
+def func2(context):
     time.sleep(2)
 
 
-@pp.Proc(now=True)
-def func3(context, deps=['func2']):
+@pp.Proc(now=True, deps=['func2'])
+def func3(context):
     time.sleep(1)
 
 
-@pp.Proc(now=True)
-def func4(context, deps=['func2', 'func3']):
+@pp.Proc(now=True, deps=['func2', 'func3'])
+def func4(context):
     time.sleep(5)
 
 
