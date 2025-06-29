@@ -11,7 +11,7 @@ with open(path.join(here, 'README.md'), encoding='utf-8') as f:
 
 setup(
     name='parproc',
-    version='0.3.1',
+    version='0.3.2',
     description='Process Parallelization',
     long_description=long_description,
     long_description_content_type='text/markdown',
