@@ -11,9 +11,10 @@ with open(path.join(here, 'README.md'), encoding='utf-8') as f:
 
 setup(
     name='parproc',
-    version='0.3.0',
+    version='0.3.1',
     description='Process Parallelization',
     long_description=long_description,
+    long_description_content_type='text/markdown',
     # url='',
     author='Oivind Loe',
     author_email='oivind.loe@gmail.com',

@@ -1,6 +1,5 @@
 ![Python package workflow status](https://github.com/magicl/parproc/actions/workflows/python-package.yml/badge.svg)
 
-
 # PARPROC
 
 A library for parallelizing scripts, by allowing different script elements to be grouped in
@@ -17,7 +16,7 @@ pip install parproc
 
 ## Usage
 
-See ```examples/success.txt``` for an example. Different jobs can be defined and dependencies between them established, e.g.:
+See ```examples/success.py``` for an example. Different jobs can be defined and dependencies between them established, e.g.:
 
 ```python
 import parproc as pp

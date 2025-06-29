@@ -8,12 +8,16 @@ import tempfile
 import time
 import traceback
 from collections import OrderedDict
-from typing import Any, Optional
+from collections.abc import Callable
+from typing import Any, Optional, TypeVar
 
 from .state import ProcState
 from .term import Term
 
 # pylint: disable=too-many-positional-arguments
+
+# Type variable for the decorated function
+F = TypeVar('F', bound=Callable[..., Any])
 
 
 class UserError(Exception):
@@ -461,7 +465,7 @@ class Proto:
     def __init__(
         self,
         name: str | None = None,
-        f: Any | None = None,
+        f: F | None = None,
         deps: list[str] | None = None,
         locks: list[str] | None = None,
         now: bool = False,
@@ -481,13 +485,16 @@ class Proto:
             self.__call__(f)
 
     # Called immediately after initialization
-    def __call__(self, f: Any) -> None:
+    def __call__(self, f: F) -> F:
 
         if self.name is None:
             self.name = f.__name__
 
         self.func = f
         ProcManager.get_inst().add_proto(self)
+
+        # Return the original function to preserve type information
+        return f
 
 
 class Proc:
@@ -507,7 +514,7 @@ class Proc:
     def __init__(
         self,
         name: str | None = None,
-        f: Any | None = None,
+        f: F | None = None,
         *,
         deps: list[str] | None = None,
         locks: list[str] | None = None,
@@ -556,7 +563,7 @@ class Proc:
         return self.state == ProcState.FAILED
 
     # Called immediately after initialization
-    def __call__(self, f: Any) -> None:
+    def __call__(self, f: F) -> F:
         # Queue is bi-directional queue to provide return value on exit (and maybe other things in the future
         def func(queue_to_proc: mp.Queue, queue_to_master: mp.Queue, context: dict[str, Any], name: str) -> None:
             # FIX: Wrap function and replace sys.stdout and sys.stderr to capture output
@@ -601,6 +608,9 @@ class Proc:
 
         self.func = func
         ProcManager.get_inst().add_proc(self)
+
+        # Return the original function to preserve type information
+        return f
 
 
 def wait_for_all(exception_on_failure: bool = True) -> None:
