@@ -1,6 +1,6 @@
 repos:
 - repo: https://github.com/pre-commit/pre-commit-hooks
-  rev: v4.5.0
+  rev: v5.0.0
   hooks:
   - id: check-yaml
     args: [--allow-multiple-documents]
@@ -19,48 +19,48 @@ repos:
   - id: trailing-whitespace
 
 - repo: https://github.com/pre-commit/mirrors-mypy
-  rev: v1.9.0
+  rev: v1.16.1
   hooks:
   - id: mypy
     verbose: true
     additional_dependencies: ['types-requests', 'types-python-dateutil', 'types-pytz']
+
 - repo: https://github.com/psf/black
-  rev: 24.3.0
+  rev: 25.1.0
   hooks:
-    - id: black
-      args: [
-      '--line-length=120',
-      '--skip-string-normalization',
-      '--target-version=py312',
-      ]
+  - id: black
+    args:
+      - '--line-length=120'
+      - '--skip-string-normalization'
+      - '--target-version=py312'
 
 - repo: https://github.com/pycqa/isort
-  rev: 5.13.2
+  rev: 6.0.1
   hooks:
-    - id: isort
-      args: [
-      '--filter-files',
-      '--profile=black', #For interop with black
-      ]
-      minimum_pre_commit_version: '2.9.2'
+  - id: isort
+    args:
+      - '--filter-files'
+      - '--profile=black'
+    minimum_pre_commit_version: '2.9.2'
 
 - repo: https://github.com/PyCQA/pylint
-  rev: v3.1.0
+  rev: v3.3.7
   hooks:
-    - id: pylint
-      args: ['--disable=line-too-long,missing-module-docstring,missing-function-docstring,missing-class-docstring,logging-fstring-interpolation,too-many-arguments,too-few-public-methods,too-many-branches,too-many-statements,too-many-instance-attributes']
-      #args: ["--disable=all", "--enable=F,E,unreachable,duplicate-key,unused-variable,unused-import,unnecessary-semicolon,global-variable-not-assigned,unused-variable,binary-op-exception,bad-format-string,anomalous-backslash-in-s
+  - id: pylint
+    args: ['--disable=line-too-long,missing-module-docstring,missing-function-docstring,missing-class-docstring,logging-fstring-interpolation,too-many-arguments,too-few-public-methods,too-many-branches,too-many-statements,too-many-instance-attributes']
 
 - repo: https://github.com/asottile/pyupgrade
-  rev: v3.15.2
+  rev: v3.20.0
   hooks:
-    - id: pyupgrade
-      args: ['--py312-plus']
+  - id: pyupgrade
+    args: ['--py312-plus']
 
 - repo: https://github.com/PyCQA/bandit
-  rev: 1.7.8
+  rev: 1.8.5
   hooks:
   - id: bandit
+
+
 
 
 #default_language_version:

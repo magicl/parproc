@@ -4,3 +4,7 @@ setuptools
 wheel
 twine
 build
+mypy
+types-requests
+types-python-dateutil
+types-pytz

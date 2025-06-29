@@ -8,6 +8,7 @@ import tempfile
 import time
 import traceback
 from collections import OrderedDict
+from typing import Any, Dict, List, Optional
 
 from .state import ProcState
 from .term import Term
@@ -26,7 +27,7 @@ logger = logging.getLogger('par')
 
 class ProcManager:
 
-    inst = None  # Singleton instance
+    inst: Optional['ProcManager'] = None  # Singleton instance
 
     def __init__(self):
 
@@ -36,35 +37,33 @@ class ProcManager:
     def clear(self):
         logger.debug('----------------CLEAR----------------------')
         self.parallel = 100
-        self.procs = OrderedDict()  # For consistent execution order
-        self.protos = {}
-        self.locks = {}
+        self.procs: OrderedDict[str, 'Proc'] = OrderedDict()  # For consistent execution order
+        self.protos: dict[str, 'Proto'] = {}
+        self.locks: dict[str, 'Proc'] = {}
 
         fmt_time = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S-%f')
-        self.context = {
+        self.context: dict[str, Any] = {
             'logdir': tempfile.mkdtemp(prefix=f'parproc_{fmt_time}_'),
             'results': {},  # Context passed to processes
             'params': {},
         }
-        self.missing_deps = {}
+        self.missing_deps: dict[str, bool] = {}
 
-    def set_options(self, parallel=None, dynamic=None):
+    def set_options(self, parallel: int | None = None, dynamic: bool | None = None) -> None:
         """
         Parallel: Number of parallel running processes
         """
         if parallel is not None:
-            self.parallel = (  # Defined in init through clear(), so pylint: disable=attribute-defined-outside-init
-                parallel
-            )
+            self.parallel = parallel
         if dynamic is not None:
             self.term.dynamic = dynamic
 
-    def set_params(self, **params):
+    def set_params(self, **params: Any) -> None:
         for k, v in params.items():
             self.context['params'][k] = v
 
     @classmethod
-    def get_inst(cls):
+    def get_inst(cls) -> 'ProcManager':
         # Only make inst available in parent process
         if mp.current_process().name.startswith('parproc-child'):
             raise UserError('Use context when calling parproc from sub-process')
@@ -74,8 +73,10 @@ class ProcManager:
 
         return cls.inst
 
-    def add_proc(self, p):
+    def add_proc(self, p: 'Proc') -> None:
         logger.debug(f'ADD: "{p.name}"')
+        if p.name is None:
+            raise UserError('Proc name cannot be None')
         if p.name in self.procs:
             raise UserError(f'Proc "{p.name}" already created')
 
@@ -85,19 +86,21 @@ class ProcManager:
             # Requested to run by script or dependent
             self.start_proc(p.name)
 
-    def add_proto(self, p):
+    def add_proto(self, p: 'Proto') -> None:
         logger.debug(f'ADD PROTO: "{p.name}"')
+        if p.name is None:
+            raise UserError('Proto name cannot be None')
         if p.name in self.protos:
             raise UserError(f'Proto "{p.name}" already created')
 
         self.protos[p.name] = p
 
-    def start_procs(self, names):
+    def start_procs(self, names: list[str]) -> None:
         for n in names:
             self.start_proc(n)
 
     # Schedules a proc for execution
-    def start_proc(self, name):
+    def start_proc(self, name: str) -> None:
         p = self.procs[name]
 
         if p.state == ProcState.IDLE:
@@ -109,7 +112,9 @@ class ProcManager:
                 self.try_execute_one(p)  # See if proc can be executed now
 
     # Create a proc from a proto
-    def create_proc(self, proto_name, proc_name=None, args=None):
+    def create_proc(
+        self, proto_name: str, proc_name: str | None = None, args: dict[str, Any] | None = None
+    ) -> str:
         proto = self.protos.get(proto_name, None)
         if proto is None:
             raise UserError('Proto "{}" is undefined')
@@ -127,7 +132,7 @@ class ProcManager:
                 i += 1
 
         # Proto args are defaults, but can be overridden by specified args
-        proc_args = {}
+        proc_args: dict[str, Any] = {}
         if proto.args:
             proc_args.update(proto.args)
         if args:
@@ -169,13 +174,13 @@ class ProcManager:
                 self.missing_deps[d] = True
 
     # Tries to execute any proc
-    def try_execute_any(self):
+    def try_execute_any(self) -> None:
         for _, p in self.procs.items():
             if p.state == ProcState.WANTED:
                 self.try_execute_one(p, False)  # Do not go deeper while iterating
 
     # Executes proc now if possible. Returns false if not possible
-    def try_execute_one(self, proc, collect=True):
+    def try_execute_one(self, proc: 'Proc', collect: bool = True) -> bool:
 
         # If all dependencies are met, and none of the locks are taken, execute proc
         for l in proc.locks:
@@ -216,7 +221,7 @@ class ProcManager:
 
         return False
 
-    def execute(self, proc):
+    def execute(self, proc: 'Proc') -> None:
         # Add context for specific process
         context = {'args': proc.args, **self.context}
         logger.info(f'Exec "{proc.name}" with context {context}')
@@ -242,7 +247,7 @@ class ProcManager:
 
     # Finds any procs that have completed their execution, and moves them on. Tries to execute other
     # procs if any procs were collected
-    def collect(self):
+    def collect(self) -> None:
         found_any = False
         for name in list(self.procs):
             p = self.procs[name]  # Might mutate procs list, so iterate pregenerated list
@@ -266,7 +271,7 @@ class ProcManager:
                         p.state = ProcState.SUCCEEDED if p.error == Proc.ERROR_NONE else ProcState.FAILED
 
                         found_any = True
-                        p.log_filename = os.path.join(self.context['logdir'], name + '.log')
+                        p.log_filename = os.path.join(str(self.context['logdir']), name + '.log')
 
                         logger.info(f'proc "{p.name}" collected: ret = {p.output}')
 
@@ -317,7 +322,7 @@ class ProcManager:
                 p.output = None
                 p.error = Proc.ERROR_TIMEOUT
                 p.state = ProcState.FAILED
-                p.log_filename = os.path.join(self.context['logdir'], name + '.log')
+                p.log_filename = os.path.join(str(self.context['logdir']), name + '.log')
 
                 logger.info(f'proc "{p.name}" timed out')
 
@@ -335,7 +340,7 @@ class ProcManager:
             self.try_execute_any()
 
     # Wait for all procs and locks
-    def wait_for_all(self, exception_on_failure=True):
+    def wait_for_all(self, exception_on_failure: bool = True) -> None:
         logger.debug('WAIT FOR COMPLETION')
         while any(p.state != ProcState.IDLE and not p.is_complete() for name, p in self.procs.items()) or self.locks:
             self._step()
@@ -348,7 +353,7 @@ class ProcManager:
             raise ProcessError('Process error [1]')
 
     # Wait for procs or locks
-    def wait(self, names):
+    def wait(self, names: list[str]) -> None:
         logger.debug(f'WAIT FOR {names}')
         while not self.check_complete(names):
             self._step()
@@ -360,17 +365,17 @@ class ProcManager:
         if self.check_failure(names):
             raise ProcessError('Process error [2]')
 
-    def check_complete(self, names):
+    def check_complete(self, names: list[str]) -> bool:
         # If proc does not exist, waits for proc to be created
         return all(self.procs[name].is_complete() if name in self.procs else False for name in names) and not any(
             name in self.locks for name in names
         )
 
-    def check_failure(self, names):
+    def check_failure(self, names: list[str]) -> bool:
         return any(self.procs[name].state == ProcState.FAILED for name in names if name in self.procs)
 
     # Move things forward
-    def _step(self):
+    def _step(self) -> None:
         # Move things forward
         self.collect()
         # Wait for a bit
@@ -381,7 +386,7 @@ class ProcManager:
     # def getData(self):
     #    return {p.name: p.output for key, p in self.procs.items()}
 
-    def wait_clear(self, exception_on_failure=False):
+    def wait_clear(self, exception_on_failure: bool = False) -> None:
         self.wait_for_all(exception_on_failure=exception_on_failure)
         self.clear()
 
@@ -389,7 +394,7 @@ class ProcManager:
 # Objects of this class only live inside the individual proc threads
 class ProcContext:
 
-    def __init__(self, proc_name, context, queue_to_proc, queue_to_master):
+    def __init__(self, proc_name: str, context: dict[str, Any], queue_to_proc: mp.Queue, queue_to_master: mp.Queue):
         self.proc_name = proc_name
         self.results = context['results']
         self.params = context['params']
@@ -397,7 +402,7 @@ class ProcContext:
         self.queue_to_proc = queue_to_proc
         self.queue_to_master = queue_to_master
 
-    def _cmd(self, **kwargs):
+    def _cmd(self, **kwargs: Any) -> dict[str, Any]:
         # Pass request to master
         self.queue_to_master.put(kwargs)
         # Get and return response
@@ -409,17 +414,18 @@ class ProcContext:
     def get_input(self, message='', password=False):
         return self._cmd(req='get-input', message=message, password=password)['resp']
 
-    def create(self, proto_name, proc_name=None, **args):
-        return self._cmd(req='create-proc', proto_name=proto_name, proc_name=proc_name, args=args)['proc_name']
+    def create(self, proto_name: str, proc_name: str | None = None, **args: Any) -> str:
+        resp = self._cmd(req='create-proc', proto_name=proto_name, proc_name=proc_name, args=args)
+        return str(resp['proc_name'])
 
-    def start(self, *names):
-        self._cmd(req='start-procs', names=names)
+    def start(self, *names: str) -> None:
+        self._cmd(req='start-procs', names=list(names))
 
-    def wait(self, *names):
+    def wait(self, *names: str) -> None:
         # Periodically poll for completion
         logger.info('waiting to wait')
         while True:
-            res = self._cmd(req='check-complete', names=names)
+            res = self._cmd(req='check-complete', names=list(names))
             if res['failure']:
                 raise ProcessError('Process error [3]')
             if res['complete']:
@@ -429,18 +435,27 @@ class ProcContext:
 
         # At this point, everything is complete
         logger.info(f'wait done. results pre: {self.results}')
-        self.results.update(self._cmd(req='get-results', names=names)['results'])
+        self.results.update(self._cmd(req='get-results', names=list(names))['results'])
         logger.info(f'wait done. results post: {self.results}')
 
 
 class Proto:
     """Decorator for process prototypes. These can be parameterized and instantiated again and again"""
 
-    def __init__(self, name=None, f=None, deps=None, locks=None, now=False, args=None, timeout=None):
+    def __init__(
+        self,
+        name: str | None = None,
+        f: Any | None = None,
+        deps: list[str] | None = None,
+        locks: list[str] | None = None,
+        now: bool = False,
+        args: dict[str, Any] | None = None,
+        timeout: float | None = None,
+    ):
         # Input properties
         self.name = name
         self.deps = deps if deps is not None else []
-        self.locks = locks if deps is not None else []
+        self.locks = locks if locks is not None else []
         self.now = now  # Whether proc will start once created
         self.args = args if args is not None else {}
         self.timeout = timeout
@@ -450,7 +465,7 @@ class Proto:
             self.__call__(f)
 
     # Called immediately after initialization
-    def __call__(self, f):
+    def __call__(self, f: Any) -> None:
 
         if self.name is None:
             self.name = f.__name__
@@ -473,7 +488,18 @@ class Proc:
     ERROR_TIMEOUT = 3
 
     # Called on intitialization
-    def __init__(self, name=None, f=None, *, deps=None, locks=None, now=False, args=None, proto=None, timeout=None):
+    def __init__(
+        self,
+        name: str | None = None,
+        f: Any | None = None,
+        *,
+        deps: list[str] | None = None,
+        locks: list[str] | None = None,
+        now: bool = False,
+        args: dict[str, Any] | None = None,
+        proto: Proto | None = None,
+        timeout: float | None = None,
+    ):
         # Input properties
         self.name = name
         self.deps = deps if deps is not None else []
@@ -487,36 +513,36 @@ class Proc:
         self.log_filename = ''
 
         # Main function
-        self.func = None
+        self.func: Any | None = None
 
         # State
-        self.start_time = None
-        self.end_time = None
-        self.process = None
-        self.queue_to_proc = None
-        self.queue_to_master = None
+        self.start_time: float | None = None
+        self.end_time: float | None = None
+        self.process: mp.Process | None = None
+        self.queue_to_proc: mp.Queue | None = None
+        self.queue_to_master: mp.Queue | None = None
         self.state = ProcState.IDLE
         self.error = Proc.ERROR_NONE
         self.more_info = ''
-        self.output = None
+        self.output: Any | None = None
 
         if f is not None:
             # Created using short-hand
             self.__call__(f)
 
-    def is_running(self):
+    def is_running(self) -> bool:
         return self.state == ProcState.RUNNING
 
-    def is_complete(self):
+    def is_complete(self) -> bool:
         return self.state in {ProcState.SUCCEEDED, ProcState.FAILED}
 
-    def is_failed(self):
+    def is_failed(self) -> bool:
         return self.state == ProcState.FAILED
 
     # Called immediately after initialization
-    def __call__(self, f):
+    def __call__(self, f: Any) -> None:
         # Queue is bi-directional queue to provide return value on exit (and maybe other things in the future
-        def func(queue_to_proc, queue_to_master, context, name):
+        def func(queue_to_proc: mp.Queue, queue_to_master: mp.Queue, context: dict[str, Any], name: str) -> None:
             # FIX: Wrap function and replace sys.stdout and sys.stderr to capture output
             # https://stackoverflow.com/questions/30793624/grabbing-stdout-of-a-function-with-multiprocessing
             logger.info(f'proc "{name}" started')
@@ -526,7 +552,7 @@ class Proc:
             ret = None
 
             # Redirect output to file, one for each process, to keep the output in sequence
-            log_filename = os.path.join(context['logdir'], name + '.log')
+            log_filename = os.path.join(str(context['logdir']), name + '.log')
             with open(log_filename, 'w', encoding='utf-8') as log_file:
                 sys.stdout = log_file  # Redirect stdout
                 sys.stderr = log_file
@@ -560,35 +586,35 @@ class Proc:
         ProcManager.get_inst().add_proc(self)
 
 
-def wait_for_all(exception_on_failure=True):
+def wait_for_all(exception_on_failure: bool = True) -> None:
     return ProcManager.get_inst().wait_for_all(exception_on_failure=exception_on_failure)
 
 
-def results():
-    return ProcManager.get_inst().context['results']
+def results() -> dict[str, Any]:
+    return dict(ProcManager.get_inst().context['results'])
 
 
-def set_params(**params):
+def set_params(**params: Any) -> None:
     ProcManager.get_inst().set_params(**params)
 
 
 # Waits for any previous job to complete, then clears state
-def wait_clear(exception_on_failure=False):
+def wait_clear(exception_on_failure: bool = False) -> None:
     return ProcManager.get_inst().wait_clear(exception_on_failure=exception_on_failure)
 
 
-def start(*names):
-    return ProcManager.get_inst().start_procs(names)
+def start(*names: str) -> None:
+    return ProcManager.get_inst().start_procs(list(names))
 
 
-def create(proto_name, proc_name=None, **args):
+def create(proto_name: str, proc_name: str | None = None, **args: Any) -> str:
     return ProcManager.get_inst().create_proc(proto_name, proc_name, args)
 
 
-def set_options(**kwargs):
+def set_options(**kwargs: Any) -> None:
     return ProcManager.get_inst().set_options(**kwargs)
 
 
 # Wait for given proc or lock names
-def wait(*names):
-    return ProcManager.get_inst().wait(names)
+def wait(*names: str) -> None:
+    return ProcManager.get_inst().wait(list(names))

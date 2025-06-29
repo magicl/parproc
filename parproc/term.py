@@ -3,18 +3,19 @@ import re
 import sys
 import time
 from collections import OrderedDict
+from typing import Any, Dict, List, Optional
 
 from .state import ProcState
 
 
 class Displayable:
-    def __init__(self, proc):
+    def __init__(self, proc: Any):
         self.proc = proc
-        self.text = []  # Additional lines of text to display for proc
+        self.text: list[str] = []  # Additional lines of text to display for proc
         self.completed = False
 
     # Get number of lines to display for item
-    def height(self):
+    def height(self) -> int:
         return 1 + len(self.text)
 
 
@@ -47,17 +48,17 @@ class Term:
 
     updatePeriod = 0.1  # Seconds between each update
 
-    def __init__(self, dynamic=True):
+    def __init__(self, dynamic: bool = True):
         # Keep track of active lines in terminal, i.e. lines we will go back and change
-        self.active = OrderedDict()
+        self.active: OrderedDict[Any, Displayable] = OrderedDict()
         self.dynamic = dynamic  # True to dynamically update shell
-        self.last_update = 0  # To limit update rate
+        self.last_update: float = 0.0  # To limit update rate
         self.anim_state = 0
 
         # self.extraLines = 0 #Set to number of extra lines output to shell whenever printing something custom
         self.height = 0  # Number of lines currently active
 
-    def start_proc(self, p):
+    def start_proc(self, p: Any) -> None:
         disp = Displayable(p)  # FIX: Will give issues if multiple instances of same proc
         self.active[p] = disp
 
@@ -68,7 +69,7 @@ class Term:
             # Add line to active lines, and print it
             self._print_line(self._proc_lines(disp))
 
-    def end_proc(self, p):
+    def end_proc(self, p: Any) -> None:
         disp = self.active[p]
         disp.completed = True
 
@@ -87,7 +88,7 @@ class Term:
             pass
 
     @staticmethod
-    def extract_error_log(text):
+    def extract_error_log(text: str) -> list[str]:
         parsers = [
             (
                 'python.sh-full',  # For when e.stderr is available
@@ -108,12 +109,12 @@ class Term:
 
     # Call to notify of proc e.g. being canceled. Will show up as completed with message depending
     # on the state of the proc
-    def completed_proc(self, p):
+    def completed_proc(self, p: Any) -> None:
         self.start_proc(p)
         self.end_proc(p)
 
     # force: force update
-    def update(self, force=False):
+    def update(self, force: bool = False) -> None:
         if len(self.active) == 0:
             return
 
@@ -149,7 +150,7 @@ class Term:
 
         sys.stdout.flush()
 
-    def get_input(self, message, password):
+    def get_input(self, message: str, password: bool) -> str:
         self.height += 3
 
         print(message)
@@ -159,7 +160,7 @@ class Term:
         return sys.stdin.readline()
 
     # Returns status line for a process
-    def _proc_lines(self, disp):
+    def _proc_lines(self, disp: Displayable) -> list[str]:
         # Main status line
         if disp.proc.state == ProcState.RUNNING and self.dynamic:
             status = Term.procStateAnim[self.anim_state % len(Term.procStateAnim)]
@@ -182,17 +183,17 @@ class Term:
         return lines
 
     # Move cursor up or down with an offset
-    def _move_cursor_vertical_offset(self, dy):
+    def _move_cursor_vertical_offset(self, dy: int) -> None:
         if dy < 0:
             print(f'\033[{-dy}A', end='')  # Move cursor up
         else:
             print(f'\033[{dy}B', end='')  # Move cursor down
 
     # Print a line, covering up whatever was on that line before
-    def _print_line(self, text):
+    def _print_line(self, text: str) -> None:
         print(f'\033[0K\r{text}')
         self.height += 1
 
-    def _print_lines(self, lines):
+    def _print_lines(self, lines: list[str]) -> None:
         for l in lines:
             self._print_line(l)
