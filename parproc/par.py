@@ -13,6 +13,8 @@ from typing import Any, Optional
 from .state import ProcState
 from .term import Term
 
+# pylint: disable=too-many-positional-arguments
+
 
 class UserError(Exception):
     pass
@@ -253,7 +255,11 @@ class ProcManager:
         found_any = False
         for name in list(self.procs):
             p = self.procs[name]  # Might mutate procs list, so iterate pregenerated list
+
             if p.is_running():
+                assert p.queue_to_master is not None  # nosec
+                assert p.queue_to_proc is not None  # nosec
+
                 # Try to get output
                 try:
                     # logger.debug('collect: looking')
