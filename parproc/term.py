@@ -3,7 +3,7 @@ import re
 import sys
 import time
 from collections import OrderedDict
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from .state import ProcState
 
@@ -67,7 +67,7 @@ class Term:
             print(f'[{stars}] {p.name} started')
         else:
             # Add line to active lines, and print it
-            self._print_line(self._proc_lines(disp))
+            self._print_lines(self._proc_lines(disp))
 
     def end_proc(self, p: Any) -> None:
         disp = self.active[p]

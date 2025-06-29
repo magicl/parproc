@@ -8,7 +8,7 @@ import tempfile
 import time
 import traceback
 from collections import OrderedDict
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
 from .state import ProcState
 from .term import Term
@@ -33,6 +33,10 @@ class ProcManager:
 
         self.clear()
         self.term = Term(dynamic=sys.stdout.isatty())
+
+        # Options are set in set_options. Defaults:
+        self.parallel = 100
+        self.dynamic = sys.stdout.isatty()
 
     def clear(self):
         logger.debug('----------------CLEAR----------------------')
@@ -112,9 +116,7 @@ class ProcManager:
                 self.try_execute_one(p)  # See if proc can be executed now
 
     # Create a proc from a proto
-    def create_proc(
-        self, proto_name: str, proc_name: str | None = None, args: dict[str, Any] | None = None
-    ) -> str:
+    def create_proc(self, proto_name: str, proc_name: str | None = None, args: dict[str, Any] | None = None) -> str:
         proto = self.protos.get(proto_name, None)
         if proto is None:
             raise UserError('Proto "{}" is undefined')
@@ -305,19 +307,27 @@ class ProcManager:
                         msg.update(
                             {'complete': self.check_complete(msg['names']), 'failure': self.check_failure(msg['names'])}
                         )
-                        p.queue_to_proc.put(msg)
+                        if p.queue_to_proc is not None:
+                            p.queue_to_proc.put(msg)
 
                     elif msg['req'] == 'get-results':
                         msg.update({'results': self.context['results']})
-                        p.queue_to_proc.put(msg)
+                        if p.queue_to_proc is not None:
+                            p.queue_to_proc.put(msg)
 
                     else:
                         raise UserError(f'unknown call: {msg["req"]}')
 
             # If still running after processing messages, check for timeout
-            if p.is_running() and p.timeout is not None and (time.time() - p.start_time) > p.timeout:
+            if (
+                p.is_running()
+                and p.timeout is not None
+                and p.start_time is not None
+                and (time.time() - p.start_time) > p.timeout
+            ):
 
-                p.process.terminate()
+                if p.process is not None:
+                    p.process.terminate()
                 p.process = None
                 p.output = None
                 p.error = Proc.ERROR_TIMEOUT
@@ -402,7 +412,7 @@ class ProcContext:
         self.queue_to_proc = queue_to_proc
         self.queue_to_master = queue_to_master
 
-    def _cmd(self, **kwargs: Any) -> dict[str, Any]:
+    def _cmd(self, **kwargs: Any) -> Any:
         # Pass request to master
         self.queue_to_master.put(kwargs)
         # Get and return response
@@ -564,8 +574,9 @@ class Proc:
                     info = str(e) + '\n' + ''.join(traceback.format_tb(tb))
 
                     # Exceptions from 'sh' sometimes have a separate stderr field
-                    if hasattr(e, 'stderr'):
-                        info += f'\nSTDERR_FULL:\n{e.stderr.decode("utf-8")}'
+                    stderr = getattr(e, 'stderr', None)
+                    if stderr is not None and isinstance(stderr, bytes):
+                        info += f'\nSTDERR_FULL:\n{stderr.decode("utf-8")}'
 
                     log_file.write(info)
                     error = Proc.ERROR_EXCEPTION

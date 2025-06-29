@@ -4,6 +4,7 @@ import logging
 import os
 import sys
 import time
+from typing import Any
 from unittest import TestCase
 
 from parameterized import parameterized  # pylint: disable=import-error
@@ -140,8 +141,8 @@ class SimpleTest(TestCase):
     def test_input(self):
 
         # Mock stdin
-        readline = sys.stdin.readline
-        sys.stdin.readline = lambda: 'the input'
+        readline: Any = sys.stdin.readline
+        sys.stdin.readline = lambda: 'the input'  # type: ignore
 
         pp.wait_clear()
 
@@ -154,7 +155,7 @@ class SimpleTest(TestCase):
         self.assertEqual(pp.results(), {'input0': 'the input'})
 
         # Restore stdin
-        sys.stdin.readline = readline
+        sys.stdin.readline = readline  # type: ignore
 
     def test_log(self):
 
