@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 2
 requires-python = ">=3.8"
 resolution-markers = [
     "python_full_version >= '3.10'",
@@ -1021,6 +1021,9 @@ wheels = [
 name = "parproc"
 version = "0.3.2"
 source = { editable = "." }
+dependencies = [
+    { name = "rich" },
+]
 
 [package.optional-dependencies]
 build = [
@@ -1060,6 +1063,7 @@ requires-dist = [
     { name = "mypy", marker = "extra == 'dev'" },
     { name = "parameterized", marker = "extra == 'dev'" },
     { name = "pre-commit", marker = "extra == 'dev'" },
+    { name = "rich", specifier = ">=14.0.0" },
     { name = "setuptools", marker = "extra == 'build'" },
     { name = "twine", marker = "extra == 'build'" },
     { name = "types-python-dateutil", marker = "extra == 'dev'" },

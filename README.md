@@ -47,5 +47,41 @@ pp.wait_for_all()
 
 Feel free to send me PRs
 
+## Setting up the development environment
+
+1. Install [uv](https://github.com/astral-sh/uv) if you haven't already
+2. Clone the repository
+3. Initialize the development environment:
+   ```sh
+   uv sync --dev
+   ```
+   This will install all dependencies and development tools.
+
+## Running tests
+
+Run all tests using the test script:
+```sh
+./scripts/test.sh
+```
+
+Or run specific test modules:
+```sh
+./scripts/test.sh tests.simple tests.proto
+```
+
+You can also run tests directly with uv:
+```sh
+uv run python -m unittest tests.simple tests.proto tests.errorformat
+```
+
+## Running examples
+
+Run any of the example scripts:
+```sh
+uv run python examples/success.py
+uv run python examples/error.py
+uv run python examples/failed_deps.py
+```
+
 
 # Change Log

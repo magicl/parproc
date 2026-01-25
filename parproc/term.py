@@ -3,16 +3,35 @@ import re
 import sys
 import time
 from collections import OrderedDict
-from typing import Any
+from typing import TYPE_CHECKING
+
+from rich.console import Console, Group
+from rich.live import Live
+from rich.panel import Panel
+from rich.progress import (
+    BarColumn,
+    Progress,
+    SpinnerColumn,
+    TaskID,
+    TextColumn,
+    TimeElapsedColumn,
+)
+from rich.syntax import Syntax
 
 from .state import ProcState
 
+if TYPE_CHECKING:
+    from .par import Proc
+
 
 class Displayable:
-    def __init__(self, proc: Any):
+    def __init__(self, proc: "Proc"):
         self.proc = proc
         self.text: list[str] = []  # Additional lines of text to display for proc
         self.completed = False
+        self.start_time: float | None = None
+        self.task_id: TaskID | None = None  # Rich Progress task ID
+        self.execution_time: str = ""  # Execution time string for completed tasks
 
     # Get number of lines to display for item
     def height(self) -> int:
@@ -22,54 +41,55 @@ class Displayable:
 # Manages terminal session.
 class Term:
 
-    procStatus = {
-        ProcState.IDLE: 'IDLE   ',
-        ProcState.WANTED: 'WANT   ',
-        ProcState.RUNNING: 'RUNNING',
-        ProcState.SUCCEEDED: '  OK!  ',
-        ProcState.FAILED: 'FAILED ',
-    }
-    procStateAnim = [
-        '*      ',
-        ' *     ',
-        '  *    ',
-        '   *   ',
-        '    *  ',
-        '     * ',
-        '      *',
-        '     * ',
-        '    *  ',
-        '   *   ',
-        '  *    ',
-        ' *     ',
-    ]
-
-    procStatusWidth = 7
-
     updatePeriod = 0.1  # Seconds between each update
 
     def __init__(self, dynamic: bool = True):
         # Keep track of active lines in terminal, i.e. lines we will go back and change
-        self.active: OrderedDict[Any, Displayable] = OrderedDict()
+        self.active: OrderedDict["Proc", Displayable] = OrderedDict()
+        self.inactive: list[Displayable] = []  # Completed processes
         self.dynamic = dynamic  # True to dynamically update shell
         self.last_update: float = 0.0  # To limit update rate
-        self.anim_state = 0
+        self.console = Console()
+        self.progress: Progress | None = None
+        self.live: Live | None = None
 
-        # self.extraLines = 0 #Set to number of extra lines output to shell whenever printing something custom
-        self.height = 0  # Number of lines currently active
+    def _ensure_progress(self) -> None:
+        """Initialize Progress and Live display if needed."""
+        if self.progress is None and self.dynamic:
+            self.progress = Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                BarColumn(),
+                TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+                TimeElapsedColumn(),
+                console=self.console,
+                transient=False,  # Keep completed tasks visible
+            )
+            self.live = Live(self._render_display(), refresh_per_second=10, console=self.console)
+            self.live.start()
 
-    def start_proc(self, p: Any) -> None:
-        disp = Displayable(p)  # FIX: Will give issues if multiple instances of same proc
+    def start_proc(self, p: "Proc") -> None:
+        disp = Displayable(p)
+        disp.start_time = time.time()
         self.active[p] = disp
 
         if not self.dynamic:
-            stars = '*' * Term.procStatusWidth
-            print(f'[{stars}] {p.name} started')
+            self._render_proc_static(disp)
         else:
-            # Add line to active lines, and print it
-            self._print_lines(self._proc_lines(disp))
+            self._ensure_progress()
+            if self.progress is not None:
+                # Create a task for this process (indeterminate progress)
+                description = self._get_description(p)
+                task_id = self.progress.add_task(description, total=None)  # None = indeterminate
+                disp.task_id = task_id
+                # Update the display
+                if self.live is not None:
+                    self.live.update(self._render_display())
 
-    def end_proc(self, p: Any) -> None:
+    def end_proc(self, p: "Proc") -> None:
+        if p not in self.active:
+            return
+
         disp = self.active[p]
         disp.completed = True
 
@@ -79,13 +99,39 @@ class Term:
                 disp.text = Term.extract_error_log(f.read())
 
         if not self.dynamic:
-            lines = self._proc_lines(self.active[p])
-            for l in lines:
-                print(l)
+            self._render_proc_static(disp)
             del self.active[p]
         else:
-            # No need to make any changes, as 'update' will take care of it
-            pass
+            # Calculate execution time
+            if disp.start_time is not None:
+                elapsed = time.time() - disp.start_time
+                disp.execution_time = f" ({elapsed:.2f}s)"
+            else:
+                disp.execution_time = ""
+
+            # Remove task from progress immediately
+            if self.progress is not None and disp.task_id is not None:
+                self.progress.remove_task(disp.task_id)
+
+            # Move to inactive (will be displayed at top of live display)
+            self.inactive.append(disp)
+            del self.active[p]
+
+            # If this was the last task, render final display and clean up
+            if len(self.active) == 0:
+                if self.live is not None:
+                    # Render final display showing all completed tasks (no progress bar)
+                    self.live.update(self._render_display())
+                    self.live.stop()
+                    self.live = None
+                elif self.progress is not None:
+                    # If live wasn't running but progress exists, render final state directly
+                    self.console.print(self._render_display())
+                self.progress = None
+            else:
+                # Update live display to show completed task at top, with remaining progress below
+                if self.live is not None:
+                    self.live.update(self._render_display())
 
     @staticmethod
     def extract_error_log(text: str) -> list[str]:
@@ -109,63 +155,128 @@ class Term:
 
     # Call to notify of proc e.g. being canceled. Will show up as completed with message depending
     # on the state of the proc
-    def completed_proc(self, p: Any) -> None:
+    def completed_proc(self, p: "Proc") -> None:
         self.start_proc(p)
         self.end_proc(p)
 
+    def _get_description(self, proc: "Proc") -> str:
+        """Get description text for a process."""
+        name = proc.name or ""
+        if proc.more_info:
+            name += f" - {proc.more_info}"
+        return name
+
     # force: force update
     def update(self, force: bool = False) -> None:
-        if len(self.active) == 0:
-            return
-
         # Only make updates every so often
         if self.dynamic and (force or time.time() - self.last_update > Term.updatePeriod):
             self.last_update = time.time()
-            old_height = self.height
-            del_height = 0
-            self.height = 0
 
-            # Move cursor up, to get ready for update
-            self._move_cursor_vertical_offset(-old_height)
+            # Update active tasks in progress
+            if self.progress is not None:
+                for proc, disp in self.active.items():
+                    if disp.task_id is not None and not disp.completed:
+                        description = self._get_description(proc)
+                        # Update description but keep progress at 0 (indeterminate)
+                        self.progress.update(disp.task_id, description=description, refresh=True)
 
-            # Find all completed processes. Draw these first, and delete them
-            for proc, disp in [(proc, disp) for proc, disp in self.active.items() if disp.completed]:
-                self._print_lines(self._proc_lines(disp))
-                del_height += disp.height()
-                del self.active[proc]
+            if self.live is not None:
+                self.live.update(self._render_display())
+            elif len(self.active) > 0:
+                # Restart live if we have active processes but no live display
+                self._ensure_progress()
+            elif len(self.active) == 0:
+                # Stop live display when no active processes remain
+                # Note: self.live is already None here (we would have taken the first branch otherwise)
+                self.progress = None
 
-            # Redraw all active procs
-            for proc, disp in self.active.items():
-                self._print_lines(self._proc_lines(disp))
-
-            # Draw over any extra lines
-            while self.height < old_height:
-                self._print_line('')
-
-            # Deleted items are now static, and can be removed from active height
-            self.height -= del_height
-
-            # Progress animation
-            self.anim_state += 1
-
-        sys.stdout.flush()
+        # self.console.flush()
 
     def get_input(self, message: str, password: bool) -> str:
-        self.height += 3
+        # Temporarily stop live display if active
+        if self.live is not None:
+            self.live.stop()
+            self.live = None
+            # Keep progress but stop live updates
 
-        print(message)
+        self.console.print(message)
         if password:
-            return getpass.getpass()
-
-        return sys.stdin.readline()
-
-    # Returns status line for a process
-    def _proc_lines(self, disp: Displayable) -> list[str]:
-        # Main status line
-        if disp.proc.state == ProcState.RUNNING and self.dynamic:
-            status = Term.procStateAnim[self.anim_state % len(Term.procStateAnim)]
+            result = getpass.getpass()
         else:
-            status = Term.procStatus[disp.proc.state]
+            result = sys.stdin.readline()
+
+        # Restart live display
+        if self.dynamic and len(self.active) > 0:
+            if self.progress is None:
+                self._ensure_progress()
+            else:
+                self.live = Live(self._render_display(), refresh_per_second=10, console=self.console)
+                self.live.start()
+
+        return result
+
+    def _render_display(self) -> Group | str:
+        """Render the complete display with completed tasks at top, then active progress below."""
+        display_parts = []
+
+        # Render completed tasks at the top
+        for disp in self.inactive:
+            # Status with checkmark, task name, and execution time
+            if disp.proc.state == ProcState.SUCCEEDED:
+                status = "[bold green]✓[/bold green]"
+            else:
+                status = "[bold red]✗[/bold red]"
+
+            completion_line = f"{status} {disp.proc.name}{disp.execution_time}"
+            display_parts.append(completion_line)
+
+            # If there's log output, show it in its own box
+            if disp.text:
+                # Join log lines and use syntax highlighting
+                log_content_str = "\n".join(disp.text)
+
+                # Use Python syntax highlighting for error logs (works well for tracebacks)
+                # For other content, try to auto-detect or use text
+                lexer = "python" if disp.proc.state == ProcState.FAILED else "text"
+                log_content = Syntax(
+                    log_content_str,
+                    lexer=lexer,
+                    theme="monokai",
+                    line_numbers=False,
+                    word_wrap=True,
+                )
+
+                # Add filename as title if it's an error with a log file
+                panel_title = None
+                if disp.proc.state == ProcState.FAILED and disp.proc.log_filename:
+                    panel_title = disp.proc.log_filename
+
+                log_panel = Panel(
+                    log_content, title=panel_title, border_style="red" if disp.proc.state == ProcState.FAILED else "dim"
+                )
+                display_parts.append(log_panel)
+
+        # Add separator if we have both completed tasks and active progress
+        if self.inactive and self.progress is not None:
+            display_parts.append("")  # Empty line separator
+
+        # Add active progress area below completed tasks
+        if self.progress is not None:
+            display_parts.append(self.progress)
+
+        if not display_parts:
+            return ""  # Empty display
+
+        return Group(*display_parts)
+
+    def _render_proc_static(self, disp: Displayable) -> None:
+        """Render a process in static (non-dynamic) mode."""
+        if disp.proc.state == ProcState.SUCCEEDED:
+            status = "[bold green]✓[/bold green]"
+        elif disp.proc.state == ProcState.FAILED:
+            status = "[bold red]✗[/bold red]"
+        else:
+            status = "[yellow]•[/yellow]"
 
         more_info = disp.proc.more_info
         if disp.proc.state == ProcState.FAILED:
@@ -175,25 +286,8 @@ class Term:
         if more_info != '':
             more_info = ' - ' + more_info
 
-        lines = [f'[{status}] {disp.proc.name}{more_info}']
+        self.console.print(f'{status} {disp.proc.name}{more_info}')
 
         if disp.text:
-            lines += ['------------------------------', *disp.text, '------------------------------']
-
-        return lines
-
-    # Move cursor up or down with an offset
-    def _move_cursor_vertical_offset(self, dy: int) -> None:
-        if dy < 0:
-            print(f'\033[{-dy}A', end='')  # Move cursor up
-        else:
-            print(f'\033[{dy}B', end='')  # Move cursor down
-
-    # Print a line, covering up whatever was on that line before
-    def _print_line(self, text: str) -> None:
-        print(f'\033[0K\r{text}')
-        self.height += 1
-
-    def _print_lines(self, lines: list[str]) -> None:
-        for l in lines:
-            self._print_line(l)
+            for line in disp.text:
+                self.console.print(f'  {line}')

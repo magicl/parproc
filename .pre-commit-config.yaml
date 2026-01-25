@@ -47,7 +47,7 @@ repos:
   rev: v3.3.7
   hooks:
   - id: pylint
-    args: ['--disable=line-too-long,missing-module-docstring,missing-function-docstring,missing-class-docstring,logging-fstring-interpolation,too-many-arguments,too-few-public-methods,too-many-branches,too-many-statements,too-many-instance-attributes']
+    args: ['--disable=line-too-long,missing-module-docstring,missing-function-docstring,missing-class-docstring,logging-fstring-interpolation,too-many-arguments,too-few-public-methods,too-many-branches,too-many-statements,too-many-instance-attributes,duplicate-code']
 
 - repo: https://github.com/asottile/pyupgrade
   rev: v3.20.0
