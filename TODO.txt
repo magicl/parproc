@@ -11,3 +11,11 @@
 # tests/simple.py: Only execute procs that either have 'now=True' or have another task with a dependency to them!
 # tests/simple.py: Add state to proc (idle, ready, complete, failed)
 # tests/simple.py: Add timeout option to each proc
+
+
+
+TODO:
+- Use rich for output formatter. Properly show output from commands if any
+- Show error / warning output if we find any in the outputs
+- Live stream output and show some of it as part of output.. 
+- Pass from onne proc to downstream whether anything changed, allowing downstream to skip if no changes

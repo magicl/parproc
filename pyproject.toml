@@ -1,0 +1,86 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "parproc"
+version = "0.3.2"
+description = "Process Parallelization"
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "MIT"}
+authors = [
+    {name = "Oivind Loe", email = "oivind.loe@gmail.com"}
+]
+keywords = ["development", "scripting"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Topic :: Software Development :: Build Tools",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "parameterized",
+    "pre-commit",
+    "mypy",
+    "types-requests",
+    "types-python-dateutil",
+    "types-pytz",
+]
+build = [
+    "setuptools",
+    "wheel",
+    "twine",
+    "build",
+]
+
+[tool.setuptools]
+# Auto-discover packages, excluding tests
+packages = {find = {exclude = ["tests*", "examples*"]}}
+
+[tool.setuptools.package-data]
+"*" = ["*.txt", "*.md"]
+
+[tool.mypy]
+python_version = "3.12"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+disallow_untyped_decorators = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_no_return = true
+warn_unreachable = true
+strict_equality = true
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "parproc.*"
+disallow_untyped_defs = false
+
+[[tool.mypy.overrides]]
+module = "tests.*"
+disallow_untyped_defs = false
+
+[[tool.mypy.overrides]]
+module = "examples.*"
+disallow_untyped_defs = false
+
+[dependency-groups]
+dev = [
+    "mypy>=1.14.1",
+    "parameterized>=0.9.0",
+]
