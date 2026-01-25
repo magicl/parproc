@@ -1,6 +1,7 @@
 # pylint: disable=unused-argument
 import logging
 import time
+from typing import cast
 from unittest import TestCase
 
 import parproc as pp
@@ -17,13 +18,13 @@ class ProtoTest(TestCase):
 
         pp.wait_clear()
 
-        @pp.Proto(name='test')
-        def proto(context, p0):
+        @pp.Proto(name='test-[p0]')
+        def proto(context: pp.ProcContext, p0: str) -> str:
             return p0 + 'ba'
 
         # Create proc and run by handle
-        pp.create('test', 'test:1', p0='ha')
-        pp.create('test', 'test:2', p0='la')
+        pp.create('test-[p0]', 'test:1', p0='ha')
+        pp.create('test-[p0]', 'test:2', p0='la')
         pp.start('test:1', 'test:2')
 
         pp.wait('test:1', 'test:2')
@@ -34,23 +35,23 @@ class ProtoTest(TestCase):
 
         pp.wait_clear()
 
-        @pp.Proto(name='proto')
-        def proc1(context, x, y):
+        @pp.Proto(name='proto-[x]-[y]')
+        def proc1(context: pp.ProcContext, x: int, y: int) -> int:
             logging.info(f'PROTO FUNC: {x}, {y}')
-            return x + context.args['y']
+            return x + cast(int, context.args['y'])
 
-        @pp.Proto(name='base')
-        def proc0(context, a, b):
+        @pp.Proto(name='base-[a]-[b]')
+        def proc0(context: pp.ProcContext, a: int, b: int) -> int:
             # Create multiple procs from within proc
-            context.create('proto', 'proto:1', x=1, y=a)
-            context.create('proto', 'proto:2', x=2, y=b)
+            context.create('proto-[x]-[y]', 'proto:1', x=1, y=a)
+            context.create('proto-[x]-[y]', 'proto:2', x=2, y=b)
 
             context.start('proto:1', 'proto:2')
             context.wait('proto:1', 'proto:2')  # Automatically feeds results into context.results
 
-            return context.results['proto:1'] + context.results['proto:2']
+            return cast(int, context.results['proto:1']) + cast(int, context.results['proto:2'])
 
-        pp.create('base', 'base', a=1, b=2)
+        pp.create('base-[a]-[b]', 'base', a=1, b=2)
         pp.start('base')
         pp.wait('base')
 
