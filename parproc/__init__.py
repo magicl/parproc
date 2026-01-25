@@ -6,6 +6,7 @@ from .par import (
     Proto,
     create,
     results,
+    run,
     set_options,
     set_params,
     start,
@@ -26,6 +27,7 @@ __all__ = [
     'wait_clear',
     'start',
     'create',
+    'run',
     'set_options',
     'wait',
 ]

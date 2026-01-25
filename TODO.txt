@@ -17,5 +17,5 @@
 TODO:
 - Use rich for output formatter. Properly show output from commands if any
 - Show error / warning output if we find any in the outputs
-- Live stream output and show some of it as part of output.. 
+- Live stream output and show some of it as part of output..
 - Pass from onne proc to downstream whether anything changed, allowing downstream to skip if no changes

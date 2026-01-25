@@ -47,6 +47,7 @@ class Term:
         # Keep track of active lines in terminal, i.e. lines we will go back and change
         self.active: OrderedDict["Proc", Displayable] = OrderedDict()
         self.inactive: list[Displayable] = []  # Completed processes
+        self.rendered_inactive: set["Proc"] = set()  # Track which inactive procs have been rendered (by proc object)
         self.dynamic = dynamic  # True to dynamically update shell
         self.last_update: float = 0.0  # To limit update rate
         self.console = Console()
@@ -120,13 +121,23 @@ class Term:
             # If this was the last task, render final display and clean up
             if len(self.active) == 0:
                 if self.live is not None:
+                    # Clear rendered tracking so all items are shown in final display
+                    self.rendered_inactive = set()
                     # Render final display showing all completed tasks (no progress bar)
                     self.live.update(self._render_display())
                     self.live.stop()
                     self.live = None
+                    # Clear inactive after Live display is stopped
+                    self.inactive = []
+                    self.rendered_inactive = set()
                 elif self.progress is not None:
+                    # Clear rendered tracking so all items are shown
+                    self.rendered_inactive = set()
                     # If live wasn't running but progress exists, render final state directly
                     self.console.print(self._render_display())
+                    # Clear inactive and rendered tracking after printing
+                    self.inactive = []
+                    self.rendered_inactive = set()
                 self.progress = None
             else:
                 # Update live display to show completed task at top, with remaining progress below
@@ -219,8 +230,16 @@ class Term:
         """Render the complete display with completed tasks at top, then active progress below."""
         display_parts = []
 
+        # Render all inactive items to ensure they remain visible
+        # Track which ones are new to prevent duplication in the final output
+        inactive_to_render = list(self.inactive)
+
+        # Mark new items as rendered (using proc object as key)
+        new_items = [disp for disp in inactive_to_render if disp.proc not in self.rendered_inactive]
+        self.rendered_inactive.update(disp.proc for disp in new_items)
+
         # Render completed tasks at the top
-        for disp in self.inactive:
+        for disp in inactive_to_render:
             # Status with checkmark, task name, and execution time
             if disp.proc.state == ProcState.SUCCEEDED:
                 status = "[bold green]✓[/bold green]"
@@ -257,8 +276,8 @@ class Term:
                 display_parts.append(log_panel)
 
         # Add separator if we have both completed tasks and active progress
-        if self.inactive and self.progress is not None:
-            display_parts.append("")  # Empty line separator
+        # if inactive_to_render and self.progress is not None:
+        #    display_parts.append("")  # Empty line separator
 
         # Add active progress area below completed tasks
         if self.progress is not None:

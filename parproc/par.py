@@ -3,6 +3,7 @@ import logging
 import multiprocessing as mp
 import os
 import queue
+import re
 import sys
 import tempfile
 import time
@@ -125,31 +126,66 @@ class ProcManager:
     def create_proc(self, proto_name: str, proc_name: str | None = None, args: dict[str, Any] | None = None) -> str:
         proto = self.protos.get(proto_name, None)
         if proto is None:
-            raise UserError('Proto "{}" is undefined')
+            raise UserError(f'Proto "{proto_name}" is undefined')
 
-        if proc_name is not None and proc_name in self.procs:
-            raise UserError('Proc name "{}" already in use')
-
-        if proc_name is None:
-            # Very simple way to find new proc_name.. Could be slow though
-            i = 0
-            while True:
-                proc_name = proto_name + ':' + str(i)
-                if proc_name not in self.procs:
-                    break
-                i += 1
+        # Find all [key] patterns in the proto name to determine which parameters are needed
+        pattern = r'\[([^\]]+)\]'
+        proto_params = set(re.findall(pattern, proto_name))
 
         # Proto args are defaults, but can be overridden by specified args
-        proc_args: dict[str, Any] = {}
+        all_args: dict[str, Any] = {}
         if proto.args:
-            proc_args.update(proto.args)
+            all_args.update(proto.args)
         if args:
-            proc_args.update(args)
+            all_args.update(args)
+
+        # Filter proc_args to only include parameters that are actually used in the proto name
+        proc_args: dict[str, Any] = {}
+        if proto_params:
+            # Only include args that match the proto's parameters
+            proc_args = {k: v for k, v in all_args.items() if k in proto_params}
+        # If no params in proto name, proc_args remains empty (no args passed)
+
+        # Create proc_name from proto_name and filtered args
+        if proc_name is None:
+            proc_name = proto_name
+            for key in proto_params:
+                if key in proc_args:
+                    # Replace [key] with the value from args
+                    proc_name = proc_name.replace(f'[{key}]', str(proc_args[key]))
+                else:
+                    # Key not found in args
+                    raise UserError(f'Proto "{proto_name}" requires argument "{key}" but was not provided')
+
+        # If proc_name already exists after substitution, return existing proc
+        if proc_name is not None and proc_name in self.procs:
+            return proc_name
+
+        # if proc_name is None:
+        #     # Very simple way to find new proc_name.. Could be slow though
+        #     i = 0
+        #     while True:
+        #         proc_name = proto_name + ':' + str(i)
+        #         if proc_name not in self.procs:
+        #             break
+        #         i += 1
+
+        # Resolve dependencies: if any dependency has @ in front, strip @, call create_proc on it
+        resolved_deps: list[str] = []
+        for dep in proto.deps:
+            if dep.startswith('@'):
+                # Strip @ and call create_proc recursively
+                # create_proc will filter args based on the child proto's parameters
+                dep_proto_name = dep[1:]  # Remove @ prefix
+                resolved_dep_name = self.create_proc(dep_proto_name, args=all_args)
+                resolved_deps.append(resolved_dep_name)
+            else:
+                resolved_deps.append(dep)
 
         # Create proc based on prototype
         proc = Proc(
             name=proc_name,
-            deps=proto.deps,
+            deps=resolved_deps,
             locks=proto.locks,
             now=proto.now,
             args=proc_args,
@@ -460,7 +496,9 @@ class ProcContext:
 
 
 class Proto:
-    """Decorator for process prototypes. These can be parameterized and instantiated again and again"""
+    """Decorator for process prototypes. These can be parameterized and instantiated again and again
+    deps: prefix with @ to reference a proto. Will be created if not found.
+    """
 
     def __init__(
         self,
@@ -636,6 +674,11 @@ def start(*names: str) -> None:
 
 def create(proto_name: str, proc_name: str | None = None, **args: Any) -> str:
     return ProcManager.get_inst().create_proc(proto_name, proc_name, args)
+
+
+def run(proto_name: str, proc_name: str | None = None, **args: Any) -> None:
+    proc_name = ProcManager.get_inst().create_proc(proto_name, proc_name, args)
+    ProcManager.get_inst().start_proc(proc_name)
 
 
 def set_options(**kwargs: Any) -> None:
