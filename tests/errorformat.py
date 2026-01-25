@@ -28,7 +28,9 @@ class ErrorFormatTest(TestCase):
   abc
 """
 
-        output = '\n'.join(Term.extract_error_log(error_msg))
+        chunks = Term.extract_error_log(error_msg, task_failed=True)
+        # Extract content from chunks and join
+        output = '\n'.join(chunk.content for chunk in chunks)
         logging.info(output)
 
         self.assertEqual(output, expected_output)
@@ -56,7 +58,9 @@ class ErrorFormatTest(TestCase):
   fooo
 """
 
-        output = '\n'.join(Term.extract_error_log(error_msg))
+        chunks = Term.extract_error_log(error_msg, task_failed=True)
+        # Extract content from chunks and join
+        output = '\n'.join(chunk.content for chunk in chunks)
         logging.info(output)
 
         self.assertEqual(output, expected_output)

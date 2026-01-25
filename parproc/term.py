@@ -1,8 +1,10 @@
 import getpass
+import os
 import re
 import sys
 import time
 from collections import OrderedDict
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from rich.console import Console, Group
@@ -24,10 +26,19 @@ if TYPE_CHECKING:
     from .par import Proc
 
 
+@dataclass
+class LogChunk:
+    """Represents a chunk of log output with line number information."""
+
+    content: str  # The actual log content (may contain newlines)
+    start_line: int  # Line number where chunk starts (1-indexed)
+    end_line: int  # Line number where chunk ends (1-indexed)
+
+
 class Displayable:
     def __init__(self, proc: "Proc"):
         self.proc = proc
-        self.text: list[str] = []  # Additional lines of text to display for proc
+        self.chunks: list[LogChunk] = []  # Log chunks to display for proc
         self.completed = False
         self.start_time: float | None = None
         self.task_id: TaskID | None = None  # Rich Progress task ID
@@ -35,13 +46,14 @@ class Displayable:
 
     # Get number of lines to display for item
     def height(self) -> int:
-        return 1 + len(self.text)
+        return 1 + sum(chunk.end_line - chunk.start_line + 1 for chunk in self.chunks)
 
 
 # Manages terminal session.
 class Term:
 
     updatePeriod = 0.1  # Seconds between each update
+    context_lines = 2  # Number of lines before and after keyword matches to include
 
     def __init__(self, dynamic: bool = True):
         # Keep track of active lines in terminal, i.e. lines we will go back and change
@@ -94,10 +106,12 @@ class Term:
         disp = self.active[p]
         disp.completed = True
 
-        # On failure show N last lines of log
-        if disp.proc.state == ProcState.FAILED and disp.proc.log_filename != '':
+        # Always analyze log if it exists (for both success and failure)
+        if disp.proc.log_filename != '':
             with open(disp.proc.log_filename, encoding='utf-8') as f:
-                disp.text = Term.extract_error_log(f.read())
+                log_text = f.read()
+                task_failed = disp.proc.state == ProcState.FAILED
+                disp.chunks = Term.extract_error_log(log_text, task_failed)
 
         if not self.dynamic:
             self._render_proc_static(disp)
@@ -145,24 +159,89 @@ class Term:
                     self.live.update(self._render_display())
 
     @staticmethod
-    def extract_error_log(text: str) -> list[str]:
-        parsers = [
-            (
-                'python.sh-full',  # For when e.stderr is available
-                re.compile(r'^.*(RAN:.*STDOUT:.*STDERR:).*STDERR_FULL:(.*)$', re.DOTALL),
-                lambda m: f'  {m.group(1)}{m.group(2)}',
-            ),
-            ('python.sh', re.compile(r'^.*(RAN:.*STDOUT:.*STDERR:.*)$', re.DOTALL), lambda m: f'  {m.group(1)}'),
-        ]
+    def extract_error_log(text: str, task_failed: bool) -> list[LogChunk]:
+        """
+        Extract relevant log chunks from text.
 
-        # Find the matching parser
-        for _, reg, output in parsers:
-            m = re.match(reg, text)
-            if m:
-                # Match with parser
-                return output(m).split('\n')
+        Args:
+            text: The full log text
+            task_failed: Whether the task failed (if True, MUST return at least one chunk)
 
-        return text.split('\n')[-16:]
+        Returns:
+            List of LogChunk objects with content and line number ranges
+        """
+        lines = text.split('\n')
+        total_lines = len(lines)
+        chunks: list[LogChunk] = []
+
+        # If task failed, try parsers first
+        if task_failed:
+            parsers = [
+                (
+                    'python.sh-full',  # For when e.stderr is available
+                    re.compile(r'^.*(RAN:.*STDOUT:.*STDERR:).*STDERR_FULL:(.*)$', re.DOTALL),
+                    lambda m: f'  {m.group(1)}{m.group(2)}',
+                ),
+                ('python.sh', re.compile(r'^.*(RAN:.*STDOUT:.*STDERR:.*)$', re.DOTALL), lambda m: f'  {m.group(1)}'),
+            ]
+
+            # Find the matching parser
+            for _, reg, output in parsers:
+                m = re.match(reg, text)
+                if m:
+                    # Match with parser - return as single chunk
+                    content = output(m)
+                    # Estimate line numbers (approximate based on content position)
+                    # For parser matches, we'll use the full range since we matched the whole text
+                    return [LogChunk(content=content, start_line=1, end_line=total_lines)]
+
+        # Search for keywords in the log (convert to lowercase for matching)
+        keywords = ['exception', 'error', 'warning', 'notice']
+        log_lower = text.lower()
+        lines_lower = [line.lower() for line in lines]
+
+        # Find line numbers where keywords appear
+        cutout_ranges: list[tuple[int, int]] = []  # List of (start_line, end_line) ranges
+
+        for keyword in keywords:
+            for line_idx, line in enumerate(lines_lower, start=1):
+                if keyword in line:
+                    # Add range: line number ± context_lines
+                    start = max(1, line_idx - Term.context_lines)
+                    end = min(total_lines, line_idx + Term.context_lines)
+                    cutout_ranges.append((start, end))
+
+        # Merge overlapping ranges
+        if cutout_ranges:
+            # Sort by start line
+            cutout_ranges.sort(key=lambda x: x[0])
+            merged: list[tuple[int, int]] = []
+            for start, end in cutout_ranges:
+                if merged and start <= merged[-1][1] + 1:  # Overlapping or adjacent
+                    # Merge with previous range
+                    merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+                else:
+                    merged.append((start, end))
+            cutout_ranges = merged
+
+        # Extract chunks from cutout ranges
+        if cutout_ranges:
+            for start, end in cutout_ranges:
+                # Extract lines (convert back to 0-indexed for list access)
+                chunk_lines = lines[start - 1 : end]
+                content = '\n'.join(chunk_lines)
+                chunks.append(LogChunk(content=content, start_line=start, end_line=end))
+        elif task_failed:
+            # If task failed but no keywords found, grab bottom 16 lines
+            # (MUST output something if task failed)
+            start = max(1, total_lines - 15)  # -15 because we want 16 lines total
+            end = total_lines
+            chunk_lines = lines[start - 1 : end]
+            content = '\n'.join(chunk_lines)
+            chunks.append(LogChunk(content=content, start_line=start, end_line=end))
+        # If task didn't fail and no keywords found, return empty list
+
+        return chunks
 
     # Call to notify of proc e.g. being canceled. Will show up as completed with message depending
     # on the state of the proc
@@ -250,9 +329,22 @@ class Term:
             display_parts.append(completion_line)
 
             # If there's log output, show it in its own box
-            if disp.text:
-                # Join log lines and use syntax highlighting
-                log_content_str = "\n".join(disp.text)
+            if disp.chunks:
+                # Combine all chunks with separators
+                chunk_parts = []
+                for i, chunk in enumerate(disp.chunks):
+                    if i > 0:
+                        # Add separator between chunks
+                        line_range = f"lines {chunk.start_line}-{chunk.end_line}"
+                        chunk_parts.append(f"\n--- {line_range} ---\n")
+                    else:
+                        # First chunk - add line range at the start
+                        line_range = f"lines {chunk.start_line}-{chunk.end_line}"
+                        chunk_parts.append(f"--- {line_range} ---\n")
+
+                    chunk_parts.append(chunk.content)
+
+                log_content_str = "".join(chunk_parts)
 
                 # Use Python syntax highlighting for error logs (works well for tracebacks)
                 # For other content, try to auto-detect or use text
@@ -268,7 +360,10 @@ class Term:
                 # Add filename as title if it's an error with a log file
                 panel_title = None
                 if disp.proc.state == ProcState.FAILED and disp.proc.log_filename:
-                    panel_title = disp.proc.log_filename
+                    # Make filename clickable using file:// protocol
+                    abs_path = os.path.abspath(disp.proc.log_filename)
+                    # Use Rich markup to create clickable link
+                    panel_title = f"[link=file://{abs_path}]{disp.proc.log_filename}[/link]"
 
                 log_panel = Panel(
                     log_content, title=panel_title, border_style="red" if disp.proc.state == ProcState.FAILED else "dim"
@@ -307,6 +402,10 @@ class Term:
 
         self.console.print(f'{status} {disp.proc.name}{more_info}')
 
-        if disp.text:
-            for line in disp.text:
-                self.console.print(f'  {line}')
+        if disp.chunks:
+            for chunk in disp.chunks:
+                # Print line range header
+                self.console.print(f'  --- lines {chunk.start_line}-{chunk.end_line} ---')
+                # Print chunk content (may contain multiple lines)
+                for line in chunk.content.split('\n'):
+                    self.console.print(f'  {line}')
