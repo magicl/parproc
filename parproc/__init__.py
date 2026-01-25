@@ -4,6 +4,8 @@ from .par import (
     ProcessError,
     ProcManager,
     Proto,
+    UserError,
+    clear,
     create,
     results,
     run,
@@ -18,6 +20,7 @@ from .par import (
 __all__ = [
     'ProcManager',
     'ProcessError',
+    'UserError',
     'ProcContext',
     'Proto',
     'Proc',
@@ -30,4 +33,5 @@ __all__ = [
     'run',
     'set_options',
     'wait',
+    'clear',
 ]

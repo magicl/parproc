@@ -118,6 +118,16 @@ class ProcManager:
             logger.debug(f'SCHED: "{p.name}"')
             p.state = ProcState.WANTED
 
+            # Check if any dependencies have a higher wave than current proc - this could cause deadlock
+            for d in p.deps:
+                if d in self.procs:
+                    dep_proc = self.procs[d]
+                    if dep_proc.wave > p.wave:
+                        raise UserError(
+                            f'Proc "{p.name}" (wave {p.wave}) cannot depend on proc "{dep_proc.name}" (wave {dep_proc.wave}). '
+                            f'Dependencies must have equal or lower wave number to avoid deadlock.'
+                        )
+
             # Set dependencies as wanted or missing
             if not self.sched_deps(p):  # If no unresolved or unfinished dependencies
                 self.try_execute_one(p)  # See if proc can be executed now
@@ -191,6 +201,7 @@ class ProcManager:
             args=proc_args,
             proto=proto,
             timeout=proto.timeout,
+            wave=proto.wave,
         )
 
         # Add new proc, by calling procs __call__ function
@@ -201,12 +212,12 @@ class ProcManager:
 
     # Schedule proc dependencies. Returns True if no new deps are found idle
     def sched_deps(self, proc):
-        # new_deps = False
+        new_deps = False
         for d in proc.deps:
             if d in self.procs:
                 if self.procs[d].state == ProcState.IDLE:
                     self.procs[d].state = ProcState.WANTED
-                    # new_deps = True
+                    new_deps = True
 
                     # Schedule dependencies of this proc
                     if not self.sched_deps(self.procs[d]):
@@ -217,6 +228,8 @@ class ProcManager:
                 # Dependency not yet known
                 self.missing_deps[d] = True
 
+        return new_deps
+
     # Tries to execute any proc
     def try_execute_any(self) -> None:
         for _, p in self.procs.items():
@@ -225,6 +238,22 @@ class ProcManager:
 
     # Executes proc now if possible. Returns false if not possible
     def try_execute_one(self, proc: 'Proc', collect: bool = True) -> bool:
+
+        # Check if any other WANTED procs have a lower wave and are ready to run - they must run first
+        # Don't block on dependencies - they will be handled by the dependency check below
+        for name, p in self.procs.items():
+            if p.state in [ProcState.WANTED, ProcState.RUNNING] and p.wave < proc.wave and name not in proc.deps:
+                # Check if this lower wave proc is ready to run (all its dependencies are complete)
+                can_run = True
+                for dep in p.deps:
+                    if dep not in self.procs or not self.procs[dep].is_complete():
+                        can_run = False
+                        break
+                if can_run:
+                    logger.debug(
+                        f'Proc "{proc.name}" not started due to lower wave proc "{p.name}" (wave {p.wave} < {proc.wave})'
+                    )
+                    return False
 
         # If all dependencies are met, and none of the locks are taken, execute proc
         for l in proc.locks:
@@ -434,6 +463,8 @@ class ProcManager:
     def _step(self) -> None:
         # Move things forward
         self.collect()
+        # Try to execute any WANTED procs
+        self.try_execute_any()
         # Wait for a bit
         time.sleep(0.01)
         # Update terminal
@@ -509,6 +540,7 @@ class Proto:
         now: bool = False,
         args: dict[str, Any] | None = None,
         timeout: float | None = None,
+        wave: int = 0,
     ):
         # Input properties
         self.name = name
@@ -517,6 +549,7 @@ class Proto:
         self.now = now  # Whether proc will start once created
         self.args = args if args is not None else {}
         self.timeout = timeout
+        self.wave = wave
 
         if f is not None:
             # Created using short-hand
@@ -560,6 +593,7 @@ class Proc:
         args: dict[str, Any] | None = None,
         proto: Proto | None = None,
         timeout: float | None = None,
+        wave: int = 0,
     ):
         # Input properties
         self.name = name
@@ -569,6 +603,8 @@ class Proc:
         self.args = args if args is not None else {}
         self.proto = proto
         self.timeout = timeout
+        # Wave defaults to proto's wave if proto exists, otherwise use provided wave (default 0)
+        self.wave = proto.wave if proto is not None else wave
 
         # Utils
         self.log_filename = ''
@@ -666,6 +702,10 @@ def set_params(**params: Any) -> None:
 # Waits for any previous job to complete, then clears state
 def wait_clear(exception_on_failure: bool = False) -> None:
     return ProcManager.get_inst().wait_clear(exception_on_failure=exception_on_failure)
+
+
+def clear() -> None:
+    ProcManager.get_inst().clear()
 
 
 def start(*names: str) -> None:
