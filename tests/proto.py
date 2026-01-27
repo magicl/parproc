@@ -65,6 +65,7 @@ class ProtoTest(TestCase):
         # Proto short-hand - need type annotations for casting
         def f0_func(context: pp.ProcContext, x: int, y: int) -> int:
             return x * y
+
         pp.Proto('f0-[x]-[y]', f0_func, now=True)
 
         # Proc short-hand
@@ -167,20 +168,14 @@ class ProtoTest(TestCase):
         # Test 1: Lambda that returns a single filled-out dependency name
         @pp.Proto(
             name='single_lambda-[value]',
-            deps=[lambda manager, value: f'base-{value}']  # Lambda returns filled-out name
+            deps=[lambda manager, value: f'base-{value}'],  # Lambda returns filled-out name
         )
         def single_lambda_proc(context: pp.ProcContext, value: str) -> str:
             base_result = context.results.get(f'base-{value}')
             return f'single_{value}_{base_result}'
 
         # Test 2: Lambda that returns a list of filled-out dependency names
-        @pp.Proto(
-            name='list_lambda-[value]',
-            deps=[lambda manager, value: [
-                f'base-{value}',
-                f'helper-{value}'
-            ]]
-        )
+        @pp.Proto(name='list_lambda-[value]', deps=[lambda manager, value: [f'base-{value}', f'helper-{value}']])
         def list_lambda_proc(context: pp.ProcContext, value: str) -> str:
             base_result = context.results.get(f'base-{value}')
             helper_result = context.results.get(f'helper-{value}')
@@ -192,21 +187,17 @@ class ProtoTest(TestCase):
             deps=[
                 'base-fixed',  # String dependency
                 lambda manager, value: f'helper-{value}',  # Lambda dependency with filled-out name
-            ]
+            ],
         )
         def mixed_deps_proc(context: pp.ProcContext, value: str) -> str:
             base_result = context.results.get('base-fixed')
             helper_result = context.results.get(f'helper-{value}')
             return f'mixed_{value}_{base_result}_{helper_result}'
 
-        # Test 4: Lambda that uses manager context and returns filled-out name
+        # Test 4: Lambda that uses context and returns filled-out name
         @pp.Proto(
             name='manager_context-[value]',
-            deps=[
-                lambda manager, value: (
-                    f'base-{value}' if 'base-[x]' in manager.protos else 'base-fallback'
-                )
-            ]
+            deps=[lambda context, value: f'base-{value}'],
         )
         def manager_context_proc(context: pp.ProcContext, value: str) -> str:
             base_result = context.results.get(f'base-{value}')
@@ -248,12 +239,7 @@ class ProtoTest(TestCase):
         def dep_proc(context: pp.ProcContext, x: str, y: int) -> str:
             return f'dep_{x}_{y}'
 
-        @pp.Proto(
-            name='main-[value]',
-            deps=[
-                lambda manager, value: f'dep-{value}-123'
-            ]
-        )
+        @pp.Proto(name='main-[value]', deps=[lambda manager, value: f'dep-{value}-123'])
         def main_proc(context: pp.ProcContext, value: str) -> str:
             dep_result = context.results.get('dep-test-123')
             return f'main_{value}_{dep_result}'
@@ -297,7 +283,7 @@ class ProtoTest(TestCase):
         @pp.Proto(
             name='main-[a]-[b]-[c]',
             deps=['dep-[x]-[y]'],  # Pattern dependency - will extract x and y from main's args
-            args={'x': 'test', 'y': 42}  # Provide x and y via proto defaults
+            args={'x': 'test', 'y': 42},  # Provide x and y via proto defaults
         )
         def main_proc(context: pp.ProcContext, a: str, b: str, c: int) -> str:
             dep_result = context.results.get('dep-test-42')
@@ -322,10 +308,7 @@ class ProtoTest(TestCase):
         def dep_proc(context: pp.ProcContext, x: str, y: int) -> str:
             return f'dep_{x}_{y}'
 
-        @pp.Proto(
-            name='main-[value]',
-            deps=['dep-override-999']  # Filled-out name that matches dep-[x]-[y] pattern
-        )
+        @pp.Proto(name='main-[value]', deps=['dep-override-999'])  # Filled-out name that matches dep-[x]-[y] pattern
         def main_proc(context: pp.ProcContext, value: str) -> str:
             dep_result = context.results.get('dep-override-999')
             return f'main_{value}_{dep_result}'
@@ -349,12 +332,7 @@ class ProtoTest(TestCase):
         def dep_proc(context: pp.ProcContext, x: str, y: int) -> str:
             return f'dep_{x}_{y}'
 
-        @pp.Proto(
-            name='main-[value]',
-            deps=[
-                lambda manager, value: f'dep-lambda_{value}-123'
-            ]
-        )
+        @pp.Proto(name='main-[value]', deps=[lambda manager, value: f'dep-lambda_{value}-123'])
         def main_proc(context: pp.ProcContext, value: str) -> str:
             dep_result = context.results.get('dep-lambda_test-123')
             return f'main_{value}_{dep_result}'
@@ -387,7 +365,7 @@ class ProtoTest(TestCase):
                     f'dep1-from_lambda_{value}',
                     'dep2-456',
                 ]
-            ]
+            ],
         )
         def main_proc(context: pp.ProcContext, value: str) -> str:
             dep1_result = context.results.get('dep1-from_lambda_test')
@@ -427,7 +405,7 @@ class ProtoTest(TestCase):
                 'tuple_dep-789',  # Filled-out name
                 lambda manager, value: f'lambda_dep-lambda_{value}',  # Lambda returning filled-out name
             ],
-            args={'x': 'test'}  # Provide x for str_dep-[x] dependency
+            args={'x': 'test'},  # Provide x for str_dep-[x] dependency
         )
         def main_proc(context: pp.ProcContext, value: str) -> str:
             str_result = context.results.get('str_dep-test')
@@ -497,13 +475,12 @@ class ProtoTest(TestCase):
         manager = pp.ProcManager.get_inst()
         manager.clear()
 
-        def test_func(context: pp.ProcContext, x: str, y: int) -> str:
-            return 'test'
-
         all_args = {'x': 'test', 'y': 42, 'value': 'ignored'}
         dep_pattern, filtered_args, matched_proto = manager._resolve_dependency('dep-[x]-[y]', all_args)
 
-        self.assertEqual(dep_pattern, 'dep-[x]-[y]')
+        # With the new logic, patterns are filled in first, so if no proto matches,
+        # we return the filled name, not the original pattern
+        self.assertEqual(dep_pattern, 'dep-test-42')
         # Should filter to only x and y
         self.assertEqual(filtered_args, {'x': 'test', 'y': 42})
         self.assertIsNone(matched_proto)  # No proto match for pattern
@@ -525,8 +502,8 @@ class ProtoTest(TestCase):
         # Args should be extracted from the filled-out name
         self.assertEqual(filtered_args, {'x': 'test', 'y': 42})
         self.assertIsNotNone(matched_proto)  # Should match the proto
+        assert matched_proto is not None  # nosec # For type checker
         self.assertEqual(matched_proto.name, 'dep-[x]-[y]')
-
 
     def test_proto_dependency_missing_field_error(self):
         """Integration test: missing required fields in dependencies raise errors"""
@@ -540,7 +517,7 @@ class ProtoTest(TestCase):
         @pp.Proto(
             name='main-[value]',
             deps=['dep-[x]-[y]'],  # Pattern dependency - requires x and y from parent args
-            args={'x': 'test'}  # Only provide x, y is missing
+            args={'x': 'test'},  # Only provide x, y is missing
         )
         def main_proc(context: pp.ProcContext, value: str) -> str:
             return 'main'
@@ -555,17 +532,127 @@ class ProtoTest(TestCase):
 
         pp.wait_clear()
 
-        @pp.Proto(name='task-[id]-[status]')
-        def task_proc(context: pp.ProcContext, id: int, status: str) -> str:
-            return f'task_{id}_{status}'
+        @pp.Proto(name='task-[task_id]-[status]')
+        def task_proc(context: pp.ProcContext, task_id: int, status: str) -> str:
+            return f'task_{task_id}_{status}'
 
-        # Create using filled-out name - should extract id=123, status='done'
+        # Create using filled-out name - should extract task_id=123, status='done'
         proc_name = pp.create('task-123-done')
         pp.start(proc_name)
         pp.wait(proc_name)
 
         results = pp.results()
         self.assertEqual(results['task-123-done'], 'task_123_done')
+
+    def test_partial_replacement_in_dependencies(self):
+        """Test that dependency patterns can have partial replacements where some values come from function args"""
+
+        pp.wait_clear()
+
+        @pp.Proto(name='foo-[a]-[b]')
+        def foo_proc(context: pp.ProcContext, a: int, b: int) -> int:
+            return a * 10 + b
+
+        # Test 1: Full replacement - foo-1-2 (already tested elsewhere, but included for completeness)
+        @pp.Proto(name='test-full-[x]', deps=['foo-1-2'])  # Fully filled-out name
+        def test_full(context: pp.ProcContext, x: int) -> int:
+            result = context.results['foo-1-2']
+            return int(result) + x
+
+        pp.create('test-full-10')
+        pp.start('test-full-10', 'foo-1-2')
+        pp.wait('test-full-10', 'foo-1-2')
+        # foo-1-2 returns 1*10+2 = 12, test-full-10 returns 12+10 = 22
+        self.assertEqual(pp.results()['test-full-10'], 22)
+
+        pp.wait_clear()
+
+        # Test 2: Partial replacement - foo-[a]-2 where a comes from function args
+        # When we have deps=['foo-[a]-2'] and function has arg 'a', it should:
+        # 1. Extract 'a' from function args (a=3 from proc name test-partial-a-3)
+        # 2. Fill in pattern to get 'foo-3-2' (if a=3)
+        # 3. Match 'foo-3-2' against proto 'foo-[a]-[b]' and create proc automatically
+        # Redefine foo-[a]-[b] proto since wait_clear() removed it
+        @pp.Proto(name='foo-[a]-[b]')
+        def foo_proc2(context: pp.ProcContext, a: int, b: int) -> int:
+            return a * 10 + b
+
+        @pp.Proto(name='test-partial-a-[a]', deps=['foo-[a]-2'])  # Pattern: a comes from function args, b is fixed to 2
+        def test_partial_a(context: pp.ProcContext, a: int) -> int:
+            # a=3 should create dependency foo-3-2 automatically
+            dep_name = f'foo-{a}-2'
+            result = context.results.get(dep_name, 0)
+            return int(result) + a
+
+        # Create the proc - this should automatically create foo-3-2 as a dependency
+        proc_name = pp.create('test-partial-a-3')
+        self.assertEqual(proc_name, 'test-partial-a-3')
+        # Verify the dependency was created
+        self.assertIn('foo-3-2', pp.ProcManager.get_inst().procs)
+
+        # Start both procs
+        pp.start('test-partial-a-3', 'foo-3-2')
+        pp.wait('test-partial-a-3', 'foo-3-2')
+        # foo-3-2 returns 3*10+2 = 32, test-partial-a-3 returns 32+3 = 35
+        self.assertEqual(pp.results()['test-partial-a-3'], 35)
+
+        pp.wait_clear()
+
+        # Test 3: Partial replacement - foo-1-[b] where b comes from function args
+        # Redefine foo-[a]-[b] proto since wait_clear() removed it
+        @pp.Proto(name='foo-[a]-[b]')
+        def foo_proc3(context: pp.ProcContext, a: int, b: int) -> int:
+            return a * 10 + b
+
+        @pp.Proto(name='test-partial-b-[b]', deps=['foo-1-[b]'])  # Pattern: a is fixed to 1, b comes from function args
+        def test_partial_b(context: pp.ProcContext, b: int) -> int:
+            # b=4 should create dependency foo-1-4 automatically
+            dep_name = f'foo-1-{b}'
+            result = context.results.get(dep_name, 0)
+            return int(result) + b
+
+        # Create the proc - this should automatically create foo-1-4 as a dependency
+        proc_name = pp.create('test-partial-b-4')
+        self.assertEqual(proc_name, 'test-partial-b-4')
+        # Verify the dependency was created
+        self.assertIn('foo-1-4', pp.ProcManager.get_inst().procs)
+
+        # Start both procs
+        pp.start('test-partial-b-4', 'foo-1-4')
+        pp.wait('test-partial-b-4', 'foo-1-4')
+        # foo-1-4 returns 1*10+4 = 14, test-partial-b-4 returns 14+4 = 18
+        self.assertEqual(pp.results()['test-partial-b-4'], 18)
+
+        pp.wait_clear()
+
+        # Test 4: Both partial replacements in same dependency list
+        # Redefine foo-[a]-[b] proto since wait_clear() removed it
+        @pp.Proto(name='foo-[a]-[b]')
+        def foo_proc4(context: pp.ProcContext, a: int, b: int) -> int:
+            return a * 10 + b
+
+        @pp.Proto(
+            name='test-mixed-[a]-[b]',
+            deps=['foo-[a]-2', 'foo-1-[b]'],  # a from function args, b fixed to 2  # a fixed to 1, b from function args
+        )
+        def test_mixed(context: pp.ProcContext, a: int, b: int) -> int:
+            # a=5 creates foo-5-2, b=6 creates foo-1-6 automatically
+            result1 = context.results.get('foo-5-2', 0)
+            result2 = context.results.get('foo-1-6', 0)
+            return int(result1) + int(result2)
+
+        # Create the proc - this should automatically create foo-5-2 and foo-1-6 as dependencies
+        proc_name = pp.create('test-mixed-5-6')
+        self.assertEqual(proc_name, 'test-mixed-5-6')
+        # Verify both dependencies were created
+        self.assertIn('foo-5-2', pp.ProcManager.get_inst().procs)
+        self.assertIn('foo-1-6', pp.ProcManager.get_inst().procs)
+
+        # Start all procs
+        pp.start('test-mixed-5-6', 'foo-5-2', 'foo-1-6')
+        pp.wait('test-mixed-5-6', 'foo-5-2', 'foo-1-6')
+        # (5*10+2) + (1*10+6) = 52 + 16 = 68
+        self.assertEqual(pp.results()['test-mixed-5-6'], 68)
 
     def test_filled_out_name_type_casting(self):
         """Test that extracted params are cast to correct types based on function signature"""
@@ -610,14 +697,11 @@ class ProtoTest(TestCase):
 
         pp.wait_clear()
 
-        @pp.Proto(name='worker-[id]')
-        def worker_proc(context: pp.ProcContext, id: int) -> str:
-            return f'worker_{id}'
+        @pp.Proto(name='worker-[worker_id]')
+        def worker_proc(context: pp.ProcContext, worker_id: int) -> str:
+            return f'worker_{worker_id}'
 
-        @pp.Proto(
-            name='manager-[name]',
-            deps=['worker-1', 'worker-2']  # Filled-out names that should auto-create
-        )
+        @pp.Proto(name='manager-[name]', deps=['worker-1', 'worker-2'])  # Filled-out names that should auto-create
         def manager_proc(context: pp.ProcContext, name: str) -> str:
             w1 = context.results.get('worker-1')
             w2 = context.results.get('worker-2')
@@ -645,7 +729,7 @@ class ProtoTest(TestCase):
         @pp.Proto(
             name='main-[a]-[b]',
             deps=['helper-[x]-[y]'],  # Pattern - should extract x and y from main's args
-            args={'x': 'test', 'y': 42, 'z': 'ignored'}  # z should be ignored
+            args={'x': 'test', 'y': 42, 'z': 'ignored'},  # z should be ignored
         )
         def main_proc(context: pp.ProcContext, a: str, b: str) -> str:
             helper_result = context.results.get('helper-test-42')

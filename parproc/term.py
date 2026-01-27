@@ -196,8 +196,7 @@ class Term:
                     return [LogChunk(content=content, start_line=1, end_line=total_lines)]
 
         # Search for keywords in the log (convert to lowercase for matching)
-        keywords = ['exception', 'error', 'warning', 'notice']
-        log_lower = text.lower()
+        keywords = ['exception', 'error', 'warning', 'notice', 'deprecated', 'deprecation']
         lines_lower = [line.lower() for line in lines]
 
         # Find line numbers where keywords appear

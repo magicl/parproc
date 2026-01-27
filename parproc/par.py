@@ -141,25 +141,69 @@ class ProcManager:
             if not self.sched_deps(p):  # If no unresolved or unfinished dependencies
                 self.try_execute_one(p)  # See if proc can be executed now
 
+    def _cast_args_by_signature(self, func: Callable, filtered_args: dict[str, Any]) -> dict[str, Any]:
+        """Cast arguments based on function signature type annotations."""
+        try:
+            sig = inspect.signature(func)
+            cast_args: dict[str, Any] = {}
+            for param_name, param_value in filtered_args.items():
+                if param_name in sig.parameters:
+                    param = sig.parameters[param_name]
+                    param_type = param.annotation
+
+                    # If type annotation exists and is not Any/empty, try to cast
+                    if param_type not in (inspect.Parameter.empty, Any):
+                        cast_args[param_name] = self._cast_single_arg(param_type, param_value)
+                    else:
+                        # No type annotation, use as-is
+                        cast_args[param_name] = param_value
+                else:
+                    # Parameter not in signature, use as-is
+                    cast_args[param_name] = param_value
+            return cast_args
+        except (ValueError, TypeError):
+            # If signature inspection fails, use args as-is
+            return filtered_args
+
+    def _cast_single_arg(self, param_type: type, param_value: Any) -> Any:
+        """Cast a single argument value to the specified type."""
+        if param_type == int:
+            return int(param_value)
+        if param_type == float:
+            return float(param_value)
+        if param_type == bool:
+            # Handle string booleans
+            if isinstance(param_value, str):
+                return param_value.lower() in ('true', '1', 'yes', 'on')
+            return bool(param_value)
+        if param_type == str:
+            return str(param_value)
+        # For other types, try to construct from string
+        try:
+            return param_type(param_value)
+        except (ValueError, TypeError):
+            # If casting fails, use original value
+            return param_value
+
     def _process_pattern_args_and_generate(
         self, pattern: str, all_args: dict[str, Any], func: Callable | None = None, generate_name: bool = False
     ) -> tuple[dict[str, Any], str | None]:
         """
         Unified function that processes pattern, filters args, casts types, and optionally generates name.
-        
+
         This combines:
         - Extracting parameter names from pattern (e.g., "proto-[x]-[y]" -> {"x", "y"})
         - Filtering to only include parameters that match the pattern's field names
         - Validating that all required parameters are present
         - Casting args to appropriate types based on function signature (if func provided)
         - Optionally generating the final name from pattern and args
-        
+
         Args:
             pattern: Name pattern with [field] placeholders (e.g., "proto-[x]-[y]")
             all_args: All available arguments
             func: Optional function to use for type casting based on signature
             generate_name: If True, generate and return the final name
-        
+
         Returns:
             Tuple of (filtered_and_cast_args, generated_name_or_none)
         """
@@ -167,7 +211,7 @@ class ProcManager:
         # This check helps type checkers understand func is not None after this point
         if func is None:
             raise UserError(f'Function must be provided for pattern "{pattern}"')
-        
+
         # Extract parameter names from pattern
         param_pattern = r'\[([^\]]+)\]'
         params = set(re.findall(param_pattern, pattern))
@@ -184,46 +228,7 @@ class ProcManager:
         # If no params in pattern, filtered_args remains empty
 
         # Cast args based on function signature if func provided
-        try:
-            sig = inspect.signature(func)
-            cast_args = {}
-            for param_name, param_value in filtered_args.items():
-                if param_name in sig.parameters:
-                    param = sig.parameters[param_name]
-                    param_type = param.annotation
-                    
-                    # If type annotation exists and is not Any/empty, try to cast
-                    if param_type != inspect.Parameter.empty and param_type != Any:
-                        # Handle common types
-                        if param_type == int:
-                            cast_args[param_name] = int(param_value)
-                        elif param_type == float:
-                            cast_args[param_name] = float(param_value)
-                        elif param_type == bool:
-                            # Handle string booleans
-                            if isinstance(param_value, str):
-                                cast_args[param_name] = param_value.lower() in ('true', '1', 'yes', 'on')
-                            else:
-                                cast_args[param_name] = bool(param_value)
-                        elif param_type == str:
-                            cast_args[param_name] = str(param_value)
-                        else:
-                            # For other types, try to construct from string
-                            try:
-                                cast_args[param_name] = param_type(param_value)
-                            except (ValueError, TypeError):
-                                # If casting fails, use original value
-                                cast_args[param_name] = param_value
-                    else:
-                        # No type annotation, use as-is
-                        cast_args[param_name] = param_value
-                else:
-                    # Parameter not in signature, use as-is
-                    cast_args[param_name] = param_value
-            filtered_args = cast_args
-        except (ValueError, TypeError):
-            # If signature inspection fails, use args as-is
-            pass
+        filtered_args = self._cast_args_by_signature(func, filtered_args)
 
         # Optionally generate the final name from pattern and filtered args
         generated_name: str | None = None
@@ -242,62 +247,86 @@ class ProcManager:
     def _resolve_dependency(self, dep: str, all_args: dict[str, Any]) -> tuple[str, dict[str, Any], Optional['Proto']]:
         """
         Resolve a dependency specification to (dep_name_or_pattern, filtered_args, matched_proto).
-        
+
         Note: Caller should check if dep is already in self.procs before calling this.
-        
+
         - dep can be a proto pattern or filled-out name
         - Returns (dep_name_or_pattern, filtered_args, matched_proto_or_none)
         """
-        # Try to find matching proto
+        # Check if dep contains placeholders - if so, fill them in first before matching
+        # This prevents patterns like "foo-[a]-2" from matching "foo-[a]-[b]" incorrectly
+        param_pattern = r'\[([^\]]+)\]'
+        params = set(re.findall(param_pattern, dep))
+
+        if params:
+            # Dep has placeholders - fill them in first, then try to match
+            filtered_args: dict[str, Any] = {k: v for k, v in all_args.items() if k in params}
+            for param in params:
+                if param not in filtered_args:
+                    raise UserError(f'Pattern "{dep}" requires argument "{param}" but was not provided')
+
+            # Fill in the pattern with available args
+            filled_name = dep
+            for param in params:
+                if param in filtered_args:
+                    filled_name = filled_name.replace(f'[{param}]', str(filtered_args[param]))
+
+            logger.debug('Filled pattern "%s" to "%s" with args %s', dep, filled_name, filtered_args)
+
+            # Try to match the filled-in name against protos
+            match_result = self._find_matching_proto(filled_name)
+            if match_result is not None:
+                proto, extracted_args = match_result
+                if proto.name is None:
+                    raise UserError('Proto has no name')
+
+                # Combine extracted args with all_args, then process
+                combined_args = {**all_args, **extracted_args}
+                # Process pattern, filter args, and cast types
+                final_args, _ = self._process_pattern_args_and_generate(proto.name, combined_args, proto.func)
+                return (filled_name, final_args, proto)
+
+            # Filled name didn't match - return as-is (might be a future proc)
+            return (filled_name, filtered_args, None)
+
+        # No placeholders - try to match directly
         match_result = self._find_matching_proto(dep)
         if match_result is not None:
             proto, extracted_args = match_result
             if proto.name is None:
-                raise UserError(f'Proto has no name')
-            
+                raise UserError('Proto has no name')
+
             # Combine extracted args with all_args, then process
             combined_args = {**all_args, **extracted_args}
             # Process pattern, filter args, and cast types
             final_args, _ = self._process_pattern_args_and_generate(proto.name, combined_args, proto.func)
             return (dep, final_args, proto)
 
-        # No match found - could be a pattern that needs args filled in
-        # Extract params and filter args manually (no proto, so no func for type casting)
-        param_pattern = r'\[([^\]]+)\]'
-        params = set(re.findall(param_pattern, dep))
-        filtered_args: dict[str, Any] = {}
-        if params:
-            filtered_args = {k: v for k, v in all_args.items() if k in params}
-            for param in params:
-                if param not in filtered_args:
-                    raise UserError(f'Pattern "{dep}" requires argument "{param}" but was not provided')
-        return (dep, filtered_args, None)
+        # No match found - return as-is (might be a future proc or will error later)
+        return (dep, {}, None)
 
-    def _resolve_proto_dependencies(self, proto: 'Proto', all_args: dict[str, Any]) -> list[str]:
-        """
-        Resolve all dependencies for a proto.
-        
-        Two-pass resolution:
-        1. First pass: expand all callable (lambda) dependencies - they can return DepSpec or list[DepSpec]
-        2. Second pass: resolve each dep (extract fields, filter args, handle tuples, generate names), 
-           match against proto patterns, and create procs if needed
-        
-        Returns:
-            List of resolved dependency names (proc names, not proto patterns)
-        """
-        # First pass: expand all callable (lambda) dependencies
+    def _expand_dependencies(self, deps: list[DepInput], all_args: dict[str, Any], proc_name: str) -> list[DepSpec]:
+        """Expand callable dependencies into a list of dependency specifications."""
+        # Create DepProcContext for lambda dependencies
+        dep_context = DepProcContext(
+            proc_name=proc_name,
+            params=self.context['params'],
+            args=all_args,
+        )
+
         expanded_deps: list[DepSpec] = []
-        for dep in proto.deps:
+        for dep in deps:
             if callable(dep):
-                # Lambda dependency: call with ProcManager context and filtered proc params
+                # Lambda dependency: call with DepProcContext and filtered proc params
                 # Inspect lambda signature to only pass expected parameters
                 sig = inspect.signature(dep)
-                param_names = set(sig.parameters.keys())
-                # Remove 'manager' if present (it's passed as first positional arg)
-                param_names.discard('manager')
+                param_names = list(sig.parameters.keys())
+                # Always ignore the first parameter (it's passed as first positional arg)
+                if param_names:
+                    param_names = param_names[1:]
                 # Filter all_args to only include parameters the lambda expects
                 filtered_lambda_args = {k: v for k, v in all_args.items() if k in param_names}
-                dep_result = dep(self, **filtered_lambda_args)
+                dep_result = dep(dep_context, **filtered_lambda_args)
                 # Expand result into deps array
                 if isinstance(dep_result, list):
                     # Validate list items are strings
@@ -313,8 +342,10 @@ class ProcManager:
                 expanded_deps.append(dep)
             else:
                 raise UserError(f'Dependency must be str or callable, got {type(dep)}')
+        return expanded_deps
 
-        # Second pass: resolve each dependency
+    def _resolve_expanded_dependencies(self, expanded_deps: list[DepSpec], all_args: dict[str, Any]) -> list[str]:
+        """Resolve expanded dependency specifications into proc names."""
         resolved_deps: list[str] = []
         for dep in expanded_deps:
             # Check if it's already an existing proc
@@ -325,16 +356,32 @@ class ProcManager:
             # Try to resolve dependency
             dep_name_or_pattern, filtered_args, matched_proto = self._resolve_dependency(dep, all_args)
 
+            matched_proto_name = matched_proto.name if matched_proto else None
+            logger.debug(
+                f'Resolved dependency "{dep}" -> name="{dep_name_or_pattern}", matched_proto={matched_proto_name}'
+            )
+
             if matched_proto is not None:
-                # Found matching proto, generate filled-out name from pattern and args, then create proc
+                # Found matching proto, create proc using the resolved name
+                # dep_name_or_pattern is already the filled-out name (either from pattern match or partial replacement)
                 if matched_proto.name is None:
-                    raise UserError(f'Proto has no name')
-                _, generated_dep_name = self._process_pattern_args_and_generate(
-                    matched_proto.name, filtered_args, matched_proto.func, generate_name=True
-                )
-                if generated_dep_name is None:
-                    raise UserError(f'Failed to generate name for dependency "{dep_name_or_pattern}"')
-                resolved_dep_name = self.create_proc(generated_dep_name)
+                    raise UserError('Proto has no name')
+
+                # If dep_name_or_pattern is already a filled-out name (no [param] placeholders), use it directly
+                # Otherwise, generate the name from the proto pattern
+                param_pattern = r'\[([^\]]+)\]'
+                if re.search(param_pattern, dep_name_or_pattern):
+                    # Still has placeholders, generate name from proto pattern
+                    _, generated_dep_name = self._process_pattern_args_and_generate(
+                        matched_proto.name, filtered_args, matched_proto.func, generate_name=True
+                    )
+                    if generated_dep_name is None:
+                        raise UserError(f'Failed to generate name for dependency "{dep_name_or_pattern}"')
+                    resolved_dep_name = self.create_proc(generated_dep_name)
+                else:
+                    # Already a filled-out name, use it directly
+                    logger.debug('Creating proc from filled-out name: "%s"', dep_name_or_pattern)
+                    resolved_dep_name = self.create_proc(dep_name_or_pattern)
                 resolved_deps.append(resolved_dep_name)
             else:
                 # No proto match - use as-is (might be a future proc or will error later)
@@ -342,52 +389,73 @@ class ProcManager:
 
         return resolved_deps
 
+    def _resolve_proto_dependencies(self, proto: 'Proto', all_args: dict[str, Any], proc_name: str) -> list[str]:
+        """
+        Resolve all dependencies for a proto.
 
-    def _find_matching_proto(self, name: str) -> Optional[tuple['Proto', dict[str, Any]]]:
+        Two-pass resolution:
+        1. First pass: expand all callable (lambda) dependencies - they can return DepSpec or list[DepSpec]
+        2. Second pass: resolve each dep (extract fields, filter args, handle tuples, generate names),
+           match against proto patterns, and create procs if needed
+
+        Args:
+            proto: The proto to resolve dependencies for
+            all_args: All available arguments (proto defaults + extracted args)
+            proc_name: Name of the proc being created
+
+        Returns:
+            List of resolved dependency names (proc names, not proto patterns)
+        """
+        # First pass: expand all callable (lambda) dependencies
+        expanded_deps = self._expand_dependencies(proto.deps, all_args, proc_name)
+
+        # Second pass: resolve each dependency
+        return self._resolve_expanded_dependencies(expanded_deps, all_args)
+
+    def _find_matching_proto(self, name: str) -> tuple['Proto', dict[str, Any]] | None:
         """
         Find a proto that matches the given name (either exact match or pattern match).
-        
+
         Args:
             name: Either exact proto name or filled-out name like "foo-a-2"
-        
+
         Returns:
             Tuple of (proto, extracted_args) if found, None otherwise
         """
         # First, try exact match
         if name in self.protos:
             return (self.protos[name], {})
-        
+
         # Then, try pattern matching against all protos
         matches: list[tuple['Proto', dict[str, Any]]] = []
         for proto in self.protos.values():
             extracted = proto.match_and_extract(name)
             if extracted is not None:
                 matches.append((proto, extracted))
-        
+
         if len(matches) > 1:
             proto_names = [m[0].name for m in matches]
             raise UserError(f'Name "{name}" matches multiple protos: {proto_names}')
-        elif len(matches) == 1:
+        if len(matches) == 1:
             return matches[0]
-        else:
-            return None
+        return None
 
     def create_proc(self, proto_name: str, proc_name: str | None = None) -> str:
         """
         Create a proc from a proto.
-        
+
         The proto_name can be either:
         - An exact proto name pattern (e.g., "foo-[x]-[y]") - proc_name must be provided
         - A filled-out name (e.g., "foo-a-2") - automatically matches proto pattern "foo-[x]-[y]"
           and extracts x='a', y='2', then generates proc_name
-        
+
         Args:
             proto_name: Either proto pattern or filled-out name that matches a proto pattern
             proc_name: Optional explicit proc name (required if proto_name is a pattern)
-        
+
         Returns:
             The created proc name (either provided or generated)
-        
+
         Raises:
             UserError: If no matching proto found, or if multiple protos match, or if required args missing
         """
@@ -395,12 +463,12 @@ class ProcManager:
         match_result = self._find_matching_proto(proto_name)
         if match_result is None:
             raise UserError(f'No proto found matching "{proto_name}"')
-        
+
         proto, extracted_args = match_result
 
         if proto.func is None or proto.name is None:
-            raise UserError(f'Proto has no function or name')
-        
+            raise UserError('Proto has no function or name')
+
         # Use the proto's actual name pattern for processing
         actual_proto_name = proto.name
 
@@ -427,7 +495,7 @@ class ProcManager:
             return proc_name
 
         # Resolve dependencies
-        resolved_deps = self._resolve_proto_dependencies(proto, all_args)
+        resolved_deps = self._resolve_proto_dependencies(proto, all_args, proc_name)
 
         # Create proc based on prototype
         proc = Proc(
@@ -763,20 +831,35 @@ class ProcContext:
         logger.info(f'wait done. results post: {self.results}')
 
 
+class DepProcContext:
+    """Context object passed to dependency lambda functions.
+
+    Similar to ProcContext but only contains the essential fields needed for dependency resolution:
+    - proc_name: Name of the proc being created
+    - params: Global parameters from ProcManager context
+    - args: Arguments specific to this proc (filtered from proto args)
+    """
+
+    def __init__(self, proc_name: str, params: dict[str, Any], args: dict[str, Any]):
+        self.proc_name = proc_name
+        self.params = params
+        self.args = args
+
+
 class Proto:
     """Decorator for process prototypes. These can be parameterized and instantiated again and again.
-    
+
     Proto names can contain [field] placeholders (e.g., "foo-[x]-[y]") which are replaced with
     actual values when creating procs. You can create procs using either:
     - The proto pattern: create_proc('foo-[x]-[y]') - requires proc_name to be provided
     - A filled-out name: create_proc('foo-a-2') - automatically extracts x='a', y='2' from the name
-    
+
     Dependencies can be:
     - Existing proc names (strings)
     - Proto patterns (e.g., "dep-[x]-[y]") - extracts matching args from parent proc's args
     - Filled-out names (e.g., "dep-test-42") - automatically matches proto pattern and creates proc
     - Callables (lambdas) that return str or list[str] - called with manager and proc args
-    
+
     Dependencies are automatically matched against proto patterns and created if not found.
     Type casting is performed automatically based on the proto function's type annotations.
     """
@@ -794,12 +877,23 @@ class Proto:
     ):
         # Input properties
         self.name = name
+        # Validate deps is a list (not a function or other type)
+        if deps is not None and not isinstance(deps, list):
+            raise UserError(
+                f'Proto deps must be a list, got {type(deps).__name__}. '
+                f'If you want to use a lambda dependency, wrap it in a list: deps=[lambda ...]'
+            )
+
         self.deps = deps if deps is not None else []
         self.locks = locks if locks is not None else []
         self.now = now  # Whether proc will start once created
         self.args = args if args is not None else {}
         self.timeout = timeout
         self.wave = wave
+
+        # Initialize regex attributes (will be set in _build_regex_pattern)
+        self.regex_pattern: re.Pattern[str] | None = None
+        self.regex_params: list[str] = []
 
         if f is not None:
             # Created using short-hand
@@ -812,11 +906,11 @@ class Proto:
             self.name = f.__name__
 
         self.func = f
-        
+
         # Generate regex pattern for matching filled-out names
         # Convert pattern like "foo-[x]-[y]" to regex that can match "foo-a-2" and extract x="a", y="2"
         self._build_regex_pattern()
-        
+
         ProcManager.get_inst().add_proto(self)
 
         # Return the original function to preserve type information
@@ -826,19 +920,19 @@ class Proto:
         """Build a regex pattern from the proto name pattern for matching filled-out names."""
         if self.name is None:
             return
-        
+
         # Find all [param] patterns in the original name
         param_pattern = r'\[([^\]]+)\]'
         params = re.findall(param_pattern, self.name)
-        
+
         if params:
             # Build regex by splitting on [param] markers
             # e.g., "foo-[x]-[y]" -> ["foo-", "[x]", "-", "[y]", ""]
             parts = re.split(r'(\[[^\]]+\])', self.name)
-            
+
             pattern_parts = []
             param_index = 0
-            
+
             for part in parts:
                 if not part:
                     continue
@@ -855,7 +949,7 @@ class Proto:
                 else:
                     # Literal text, escape it
                     pattern_parts.append(re.escape(part))
-            
+
             regex_str = '^' + ''.join(pattern_parts) + '$'
             self.regex_pattern = re.compile(regex_str)
             self.regex_params = params
@@ -867,24 +961,24 @@ class Proto:
     def match_and_extract(self, name: str) -> dict[str, Any] | None:
         """
         Try to match a filled-out name against this proto's pattern and extract parameters.
-        
+
         Args:
             name: Filled-out name like "foo-a-2" for pattern "foo-[x]-[y]"
-        
+
         Returns:
             Dict of extracted parameters if match, None otherwise
         """
         match = self.regex_pattern.match(name)
         if not match:
             return None
-        
+
         # Extract parameter values from match groups
         extracted = {}
         for param in self.regex_params:
             value_str = match.group(param)
             # Type casting will be done later based on function signature
             extracted[param] = value_str
-        
+
         return extracted
 
 
@@ -1044,8 +1138,10 @@ def run(proto_name: str, proc_name: str | None = None) -> None:
 def set_options(**kwargs: Any) -> None:
     return ProcManager.get_inst().set_options(**kwargs)
 
+
 def get_procs() -> dict[str, Proc]:
     return ProcManager.get_inst().procs
+
 
 def get_protos() -> dict[str, Proto]:
     return ProcManager.get_inst().protos
