@@ -918,6 +918,12 @@ def run(proto_name: str, proc_name: str | None = None, **args: Any) -> None:
 def set_options(**kwargs: Any) -> None:
     return ProcManager.get_inst().set_options(**kwargs)
 
+def get_procs() -> dict[str, Proc]:
+    return ProcManager.get_inst().procs
+
+def get_protos() -> dict[str, Proto]:
+    return ProcManager.get_inst().protos
+
 
 # Wait for given proc or lock names
 def wait(*names: str) -> None:

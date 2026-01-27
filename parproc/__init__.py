@@ -15,6 +15,8 @@ from .par import (
     wait,
     wait_clear,
     wait_for_all,
+    get_procs,
+    get_protos,
 )
 
 __all__ = [
@@ -34,4 +36,6 @@ __all__ = [
     'set_options',
     'wait',
     'clear',
+    'get_procs',
+    'get_protos',
 ]
