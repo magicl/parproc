@@ -147,3 +147,450 @@ class ProtoTest(TestCase):
 
         # Verify dependency was created automatically
         self.assertIn('dep_proto-test', pp.ProcManager.get_inst().procs)
+
+    def test_proto_lambda_dependencies(self):
+        """Test that proto deps can be lambdas that are called with context and proc params"""
+
+        pp.wait_clear()
+
+        # Define some base procs that will be used as dependencies
+        @pp.Proto(name='base-[x]')
+        def base_proc(context: pp.ProcContext, x: str) -> str:
+            return f'base_{x}'
+
+        @pp.Proto(name='helper-[y]')
+        def helper_proc(context: pp.ProcContext, y: str) -> str:
+            return f'helper_{y}'
+
+        # Test 1: Lambda that returns a single tuple dependency with [value] substitution
+        @pp.Proto(
+            name='single_lambda-[value]',
+            deps=[lambda manager, value: ('@base-[x]', {'x': '[value]'})]  # Lambda returns tuple with [value] substitution
+        )
+        def single_lambda_proc(context: pp.ProcContext, value: str) -> str:
+            base_result = context.results.get(f'base-{value}')
+            return f'single_{value}_{base_result}'
+
+        # Test 2: Lambda that returns a list of tuple dependencies with [value] substitution
+        @pp.Proto(
+            name='list_lambda-[value]',
+            deps=[lambda manager, value: [
+                ('@base-[x]', {'x': '[value]'}),
+                ('@helper-[y]', {'y': '[value]'})
+            ]]
+        )
+        def list_lambda_proc(context: pp.ProcContext, value: str) -> str:
+            base_result = context.results.get(f'base-{value}')
+            helper_result = context.results.get(f'helper-{value}')
+            return f'list_{value}_{base_result}_{helper_result}'
+
+        # Test 3: Mix of string and lambda dependencies
+        @pp.Proto(
+            name='mixed_deps-[value]',
+            deps=[
+                'base-fixed',  # String dependency
+                lambda manager, value: ('@helper-[y]', {'y': '[value]'}),  # Lambda dependency with [value] substitution
+            ]
+        )
+        def mixed_deps_proc(context: pp.ProcContext, value: str) -> str:
+            base_result = context.results.get('base-fixed')
+            helper_result = context.results.get(f'helper-{value}')
+            return f'mixed_{value}_{base_result}_{helper_result}'
+
+        # Test 4: Lambda that uses manager context and returns tuple with [value] substitution
+        @pp.Proto(
+            name='manager_context-[value]',
+            deps=[
+                lambda manager, value: (
+                    ('@base-[x]', {'x': '[value]'}) if 'base-[x]' in manager.protos else ('@base-[x]', {'x': 'fallback'})
+                )
+            ]
+        )
+        def manager_context_proc(context: pp.ProcContext, value: str) -> str:
+            base_result = context.results.get(f'base-{value}')
+            return f'manager_{value}_{base_result}'
+
+        # Create and run procs
+        pp.create('base-[x]', 'base-fixed', x='fixed')
+        pp.create('base-[x]', 'base-test', x='test')
+        pp.create('helper-[y]', 'helper-test', y='test')
+
+        single_name = pp.create('single_lambda-[value]', value='test')
+        list_name = pp.create('list_lambda-[value]', value='test')
+        mixed_name = pp.create('mixed_deps-[value]', value='test')
+        manager_name = pp.create('manager_context-[value]', value='test')
+
+        pp.start('base-fixed', 'base-test', 'helper-test', single_name, list_name, mixed_name, manager_name)
+        pp.wait('base-fixed', 'base-test', 'helper-test', single_name, list_name, mixed_name, manager_name)
+
+        results = pp.results()
+
+        # Verify single lambda dependency
+        self.assertEqual(results['single_lambda-test'], 'single_test_base_test')
+
+        # Verify list lambda dependencies
+        self.assertEqual(results['list_lambda-test'], 'list_test_base_test_helper_test')
+
+        # Verify mixed dependencies
+        self.assertEqual(results['mixed_deps-test'], 'mixed_test_base_fixed_helper_test')
+
+        # Verify manager context lambda
+        self.assertEqual(results['manager_context-test'], 'manager_test_base_test')
+
+    def test_proto_lambda_with_value_substitution(self):
+        """Integration test: lambda dependencies with [value] substitution in override dict"""
+
+        pp.wait_clear()
+
+        @pp.Proto(name='dep-[x]-[y]')
+        def dep_proc(context: pp.ProcContext, x: str, y: int) -> str:
+            return f'dep_{x}_{y}'
+
+        @pp.Proto(
+            name='main-[value]',
+            deps=[
+                lambda manager, value: ('@dep-[x]-[y]', {'x': '[value]', 'y': 123})
+            ]
+        )
+        def main_proc(context: pp.ProcContext, value: str) -> str:
+            dep_result = context.results.get('dep-test-123')
+            return f'main_{value}_{dep_result}'
+
+        proc_name = pp.create('main-[value]', value='test')
+        pp.start(proc_name)
+        pp.wait(proc_name)
+
+        results = pp.results()
+        # Verify [value] was substituted with 'test'
+        self.assertEqual(results['dep-test-123'], 'dep_test_123')
+        self.assertEqual(results['main-test'], 'main_test_dep_test_123')
+
+    def test_process_pattern_and_args_filters_correctly(self):
+        """Test that _process_pattern_and_args only includes matching parameters"""
+        manager = pp.ProcManager.get_inst()
+        manager.clear()
+
+        # Pattern requires x and y, but we provide x, y, a, b, c
+        all_args = {'x': 'test', 'y': 42, 'a': 'A', 'b': 'B', 'c': 100}
+        filtered = manager._process_pattern_and_args('dep-[x]-[y]', all_args)
+
+        # Should only have x and y, not a, b, c
+        self.assertEqual(filtered, {'x': 'test', 'y': 42})
+        self.assertNotIn('a', filtered)
+        self.assertNotIn('b', filtered)
+        self.assertNotIn('c', filtered)
+
+    def test_proto_dependency_field_filtering(self):
+        """Integration test: dependencies with [field] patterns only receive matching args"""
+
+        pp.wait_clear()
+
+        @pp.Proto(name='dep-[x]-[y]')
+        def dep_proc(context: pp.ProcContext, x: str, y: int) -> str:
+            return f'dep_{x}_{y}'
+
+        @pp.Proto(
+            name='main-[a]-[b]-[c]',
+            deps=['@dep-[x]-[y]']  # Should only receive x and y from args, not a, b, c
+        )
+        def main_proc(context: pp.ProcContext, a: str, b: str, c: int) -> str:
+            dep_result = context.results.get('dep-test-42')
+            return f'main_{a}_{b}_{c}_{dep_result}'
+
+        # Create main proc with all args - dep should only get x and y
+        proc_name = pp.create('main-[a]-[b]-[c]', a='A', b='B', c=100, x='test', y=42)
+        pp.start(proc_name)
+        pp.wait(proc_name)
+
+        results = pp.results()
+        # Verify dep only got x and y (not a, b, c)
+        self.assertEqual(results['dep-test-42'], 'dep_test_42')
+        self.assertEqual(results['main-A-B-100'], 'main_A_B_100_dep_test_42')
+
+    def test_process_pattern_and_args_with_override(self):
+        """Test that _process_pattern_and_args applies override_dict correctly"""
+        manager = pp.ProcManager.get_inst()
+        manager.clear()
+
+        # Pattern requires x and y
+        all_args = {'x': 'original', 'y': 0, 'value': 'test'}
+        override_dict = {'x': 'override', 'y': 999}
+        filtered = manager._process_pattern_and_args('dep-[x]-[y]', all_args, override_dict)
+
+        # Should have overridden values, not original values
+        self.assertEqual(filtered, {'x': 'override', 'y': 999})
+        self.assertNotIn('value', filtered)
+
+    def test_proto_dependency_tuple_override(self):
+        """Integration test: tuple dependencies (dep_name, override_dict) override filtered args"""
+
+        pp.wait_clear()
+
+        @pp.Proto(name='dep-[x]-[y]')
+        def dep_proc(context: pp.ProcContext, x: str, y: int) -> str:
+            return f'dep_{x}_{y}'
+
+        @pp.Proto(
+            name='main-[value]',
+            deps=[
+                ('@dep-[x]-[y]', {'x': 'override', 'y': 999})  # Override x and y
+            ]
+        )
+        def main_proc(context: pp.ProcContext, value: str) -> str:
+            dep_result = context.results.get('dep-override-999')
+            return f'main_{value}_{dep_result}'
+
+        # Create main proc - dep should get overridden values, not value
+        proc_name = pp.create('main-[value]', value='test', x='ignored', y=0)
+        pp.start(proc_name)
+        pp.wait(proc_name)
+
+        results = pp.results()
+        # Verify dep got overridden values
+        self.assertEqual(results['dep-override-999'], 'dep_override_999')
+        self.assertEqual(results['main-test'], 'main_test_dep_override_999')
+
+    def test_proto_lambda_returns_tuple(self):
+        """Test that lambdas can return tuple dependencies"""
+
+        pp.wait_clear()
+
+        @pp.Proto(name='dep-[x]-[y]')
+        def dep_proc(context: pp.ProcContext, x: str, y: int) -> str:
+            return f'dep_{x}_{y}'
+
+        @pp.Proto(
+            name='main-[value]',
+            deps=[
+                lambda manager, value: ('@dep-[x]-[y]', {'x': f'lambda_{value}', 'y': 123})
+            ]
+        )
+        def main_proc(context: pp.ProcContext, value: str) -> str:
+            dep_result = context.results.get('dep-lambda_test-123')
+            return f'main_{value}_{dep_result}'
+
+        proc_name = pp.create('main-[value]', value='test')
+        pp.start(proc_name)
+        pp.wait(proc_name)
+
+        results = pp.results()
+        self.assertEqual(results['dep-lambda_test-123'], 'dep_lambda_test_123')
+        self.assertEqual(results['main-test'], 'main_test_dep_lambda_test_123')
+
+    def test_proto_lambda_returns_list_with_tuples(self):
+        """Test that lambdas can return lists containing tuples"""
+
+        pp.wait_clear()
+
+        @pp.Proto(name='dep1-[x]')
+        def dep1_proc(context: pp.ProcContext, x: str) -> str:
+            return f'dep1_{x}'
+
+        @pp.Proto(name='dep2-[y]')
+        def dep2_proc(context: pp.ProcContext, y: int) -> str:
+            return f'dep2_{y}'
+
+        @pp.Proto(
+            name='main-[value]',
+            deps=[
+                lambda manager, value: [
+                    ('@dep1-[x]', {'x': f'from_lambda_{value}'}),
+                    ('@dep2-[y]', {'y': 456}),
+                ]
+            ]
+        )
+        def main_proc(context: pp.ProcContext, value: str) -> str:
+            dep1_result = context.results.get('dep1-from_lambda_test')
+            dep2_result = context.results.get('dep2-456')
+            return f'main_{value}_{dep1_result}_{dep2_result}'
+
+        proc_name = pp.create('main-[value]', value='test')
+        pp.start(proc_name)
+        pp.wait(proc_name)
+
+        results = pp.results()
+        self.assertEqual(results['dep1-from_lambda_test'], 'dep1_from_lambda_test')
+        self.assertEqual(results['dep2-456'], 'dep2_456')
+        self.assertEqual(results['main-test'], 'main_test_dep1_from_lambda_test_dep2_456')
+
+    def test_proto_mixed_dependency_types(self):
+        """Test mixing string, tuple, and lambda dependencies"""
+
+        pp.wait_clear()
+
+        @pp.Proto(name='str_dep-[x]')
+        def str_dep(context: pp.ProcContext, x: str) -> str:
+            return f'str_{x}'
+
+        @pp.Proto(name='tuple_dep-[y]')
+        def tuple_dep(context: pp.ProcContext, y: int) -> str:
+            return f'tuple_{y}'
+
+        @pp.Proto(name='lambda_dep-[z]')
+        def lambda_dep(context: pp.ProcContext, z: str) -> str:
+            return f'lambda_{z}'
+
+        @pp.Proto(
+            name='main-[value]',
+            deps=[
+                '@str_dep-[x]',  # String dependency
+                ('@tuple_dep-[y]', {'y': 789}),  # Tuple dependency
+                lambda manager, value: ('@lambda_dep-[z]', {'z': f'lambda_{value}'}),  # Lambda returning tuple
+            ]
+        )
+        def main_proc(context: pp.ProcContext, value: str) -> str:
+            str_result = context.results.get('str_dep-test')
+            tuple_result = context.results.get('tuple_dep-789')
+            lambda_result = context.results.get('lambda_dep-lambda_test')
+            return f'main_{value}_{str_result}_{tuple_result}_{lambda_result}'
+
+        proc_name = pp.create('main-[value]', value='test', x='test', y=0, z='ignored')
+        pp.start(proc_name)
+        pp.wait(proc_name)
+
+        results = pp.results()
+        self.assertEqual(results['str_dep-test'], 'str_test')
+        self.assertEqual(results['tuple_dep-789'], 'tuple_789')
+        self.assertEqual(results['lambda_dep-lambda_test'], 'lambda_lambda_test')
+        self.assertEqual(results['main-test'], 'main_test_str_test_tuple_789_lambda_lambda_test')
+
+    def test_process_pattern_and_args_missing_field_error(self):
+        """Test that _process_pattern_and_args raises error for missing required fields"""
+        manager = pp.ProcManager.get_inst()
+        manager.clear()
+
+        # Pattern requires x and y, but only x is provided
+        all_args = {'x': 'test', 'value': 'test'}
+
+        with self.assertRaises(pp.UserError) as cm:
+            manager._process_pattern_and_args('dep-[x]-[y]', all_args)
+        self.assertIn('requires argument "y"', str(cm.exception))
+
+    def test_process_pattern_and_args_missing_field_with_override(self):
+        """Test that override_dict can provide missing required fields"""
+        manager = pp.ProcManager.get_inst()
+        manager.clear()
+
+        # Pattern requires x and y, but only x is in args
+        all_args = {'x': 'test'}
+        override_dict = {'y': 42}  # Provide y via override
+
+        filtered = manager._process_pattern_and_args('dep-[x]-[y]', all_args, override_dict)
+        self.assertEqual(filtered, {'x': 'test', 'y': 42})
+
+    def test_generate_name_from_pattern(self):
+        """Test that _generate_name_from_pattern correctly replaces [field] placeholders"""
+        manager = pp.ProcManager.get_inst()
+        manager.clear()
+
+        pattern = 'proto-[x]-[y]'
+        args = {'x': 'test', 'y': 42}
+        name = manager._generate_name_from_pattern(pattern, args)
+
+        self.assertEqual(name, 'proto-test-42')
+
+    def test_generate_name_from_pattern_missing_arg(self):
+        """Test that _generate_name_from_pattern raises error for missing args"""
+        manager = pp.ProcManager.get_inst()
+        manager.clear()
+
+        pattern = 'proto-[x]-[y]'
+        args = {'x': 'test'}  # Missing y
+
+        with self.assertRaises(pp.UserError) as cm:
+            manager._generate_name_from_pattern(pattern, args)
+        self.assertIn('requires argument "y"', str(cm.exception))
+
+    def test_resolve_dependency_string(self):
+        """Test _resolve_dependency with string dependency"""
+        manager = pp.ProcManager.get_inst()
+        manager.clear()
+
+        all_args = {'x': 'test', 'y': 42, 'value': 'ignored'}
+        dep_pattern, filtered_args, is_proto_ref = manager._resolve_dependency('dep-[x]-[y]', all_args)
+
+        self.assertEqual(dep_pattern, 'dep-[x]-[y]')
+        self.assertEqual(filtered_args, {'x': 'test', 'y': 42})
+        self.assertFalse(is_proto_ref)
+
+    def test_resolve_dependency_tuple(self):
+        """Test _resolve_dependency with tuple dependency"""
+        manager = pp.ProcManager.get_inst()
+        manager.clear()
+
+        all_args = {'x': 'original', 'y': 0}
+        override_dict = {'x': 'override', 'y': 999}
+        dep_pattern, filtered_args, is_proto_ref = manager._resolve_dependency(
+            ('dep-[x]-[y]', override_dict), all_args
+        )
+
+        self.assertEqual(dep_pattern, 'dep-[x]-[y]')
+        self.assertEqual(filtered_args, {'x': 'override', 'y': 999})
+        self.assertFalse(is_proto_ref)
+
+    def test_resolve_dependency_proto_ref(self):
+        """Test _resolve_dependency with @ proto reference"""
+        manager = pp.ProcManager.get_inst()
+        manager.clear()
+
+        all_args = {'x': 'test', 'y': 42}
+        dep_pattern, filtered_args, is_proto_ref = manager._resolve_dependency('@dep-[x]-[y]', all_args)
+
+        self.assertEqual(dep_pattern, '@dep-[x]-[y]')
+        self.assertEqual(filtered_args, {'x': 'test', 'y': 42})
+        self.assertTrue(is_proto_ref)
+
+    def test_substitute_field_references_in_override(self):
+        """Test that [field] references in override dict values are substituted"""
+        manager = pp.ProcManager.get_inst()
+        manager.clear()
+
+        all_args = {'value': 'test_value', 'x': 'ignored'}
+        override_dict = {'x': '[value]'}  # Should substitute [value] with 'test_value'
+
+        filtered = manager._process_pattern_and_args('dep-[x]', all_args, override_dict)
+        self.assertEqual(filtered, {'x': 'test_value'})
+
+    def test_substitute_field_references_multiple(self):
+        """Test that multiple [field] references in override dict values are substituted"""
+        manager = pp.ProcManager.get_inst()
+        manager.clear()
+
+        all_args = {'prefix': 'pre', 'suffix': 'suf', 'x': 'ignored'}
+        override_dict = {'x': '[prefix]-middle-[suffix]'}  # Should substitute both
+
+        filtered = manager._process_pattern_and_args('dep-[x]', all_args, override_dict)
+        self.assertEqual(filtered, {'x': 'pre-middle-suf'})
+
+    def test_substitute_field_references_missing_field(self):
+        """Test that missing field in [field] reference raises error"""
+        manager = pp.ProcManager.get_inst()
+        manager.clear()
+
+        all_args = {'x': 'test'}
+        override_dict = {'x': '[missing]'}  # Missing field
+
+        with self.assertRaises(pp.UserError) as cm:
+            manager._process_pattern_and_args('dep-[x]', all_args, override_dict)
+        self.assertIn('Field reference "[missing]"', str(cm.exception))
+
+    def test_proto_dependency_missing_field_error(self):
+        """Integration test: missing required fields in dependencies raise errors"""
+
+        pp.wait_clear()
+
+        @pp.Proto(name='dep-[x]-[y]')
+        def dep_proc(context: pp.ProcContext, x: str, y: int) -> str:
+            return f'dep_{x}_{y}'
+
+        @pp.Proto(
+            name='main-[value]',
+            deps=['@dep-[x]-[y]']  # Requires x and y
+        )
+        def main_proc(context: pp.ProcContext, value: str) -> str:
+            return 'main'
+
+        # Should raise error because y is missing
+        with self.assertRaises(pp.UserError) as cm:
+            pp.create('main-[value]', value='test', x='test')
+        self.assertIn('requires argument "y"', str(cm.exception))

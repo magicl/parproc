@@ -1,4 +1,5 @@
 import datetime
+import inspect
 import logging
 import multiprocessing as mp
 import os
@@ -10,7 +11,7 @@ import time
 import traceback
 from collections import OrderedDict
 from collections.abc import Callable
-from typing import Any, Optional, TypeVar
+from typing import Any, Optional, TypeVar, Union
 
 from .state import ProcState
 from .term import Term
@@ -19,6 +20,15 @@ from .term import Term
 
 # Type variable for the decorated function
 F = TypeVar('F', bound=Callable[..., Any])
+
+# Types for dependency specifications
+# A dependency can be:
+# - A string (dependency name, possibly with [field] patterns)
+# - A tuple of (dependency_name, override_dict) where override_dict overrides args
+# - A callable (lambda) that returns DepSpec or list[DepSpec]
+DepSpec = Union[str, tuple[str, dict[str, Any]]]
+DepSpecOrList = Union[DepSpec, list[DepSpec]]
+DepInput = Union[DepSpec, Callable[..., DepSpecOrList]]
 
 
 class UserError(Exception):
@@ -132,15 +142,227 @@ class ProcManager:
             if not self.sched_deps(p):  # If no unresolved or unfinished dependencies
                 self.try_execute_one(p)  # See if proc can be executed now
 
+    def _generate_name_from_pattern(self, pattern: str, args: dict[str, Any]) -> str:
+        """
+        Generate a name from a pattern and args by replacing [field] with values.
+        
+        Args:
+            pattern: Name pattern with [field] placeholders (e.g., "proto-[x]-[y]")
+            args: Arguments to use for substitution
+        
+        Returns:
+            Generated name with [field] replaced by values
+        """
+        # Extract parameter names from pattern
+        param_pattern = r'\[([^\]]+)\]'
+        params = set(re.findall(param_pattern, pattern))
+
+        generated_name = pattern
+        for param in params:
+            if param in args:
+                # Replace [param] with the value from args
+                generated_name = generated_name.replace(f'[{param}]', str(args[param]))
+            else:
+                # Key not found in args
+                raise UserError(f'Pattern "{pattern}" requires argument "{param}" but was not provided')
+
+        return generated_name
+
+    def _substitute_field_references(self, value: Any, all_args: dict[str, Any]) -> Any:
+        """
+        Substitute [field] references in a value with values from all_args.
+        
+        If value is a string containing [field] patterns, replace them with values from all_args.
+        For example: "[value]" -> all_args['value'], "prefix-[x]-suffix" -> "prefix-{all_args['x']}-suffix"
+        
+        Args:
+            value: Value that may contain [field] references
+            all_args: Dictionary of available arguments
+        
+        Returns:
+            Value with [field] references substituted, or original value if no substitution needed
+        """
+        if not isinstance(value, str):
+            return value
+
+        # Find all [field] patterns in the value
+        param_pattern = r'\[([^\]]+)\]'
+        matches = re.findall(param_pattern, value)
+
+        if not matches:
+            return value
+
+        # Substitute each [field] with the value from all_args
+        substituted = value
+        for field in matches:
+            if field in all_args:
+                substituted = substituted.replace(f'[{field}]', str(all_args[field]))
+            else:
+                raise UserError(f'Field reference "[{field}]" in override dict value "{value}" not found in args')
+
+        return substituted
+
+    def _process_pattern_and_args(
+        self, pattern: str, all_args: dict[str, Any], override_dict: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        """
+        Process a pattern and args: extract params, combine args and overrides, filter to matching params.
+        
+        This combines:
+        - Extracting parameter names from pattern (e.g., "proto-[x]-[y]" -> {"x", "y"})
+        - Substituting [field] references in override_dict values with values from all_args
+        - Combining all_args and override_dict (override takes precedence)
+        - Filtering to only include parameters that match the pattern's field names
+        - Validating that all required parameters are present
+        
+        Args:
+            pattern: Name pattern with [field] placeholders (e.g., "proto-[x]-[y]")
+            all_args: All available arguments
+            override_dict: Optional dict to override args (values may contain [field] references)
+        
+        Returns:
+            Filtered and overridden args (only includes params matching the pattern)
+        """
+        # Extract parameter names from pattern
+        param_pattern = r'\[([^\]]+)\]'
+        params = set(re.findall(param_pattern, pattern))
+
+        # Substitute [field] references in override_dict values before combining
+        processed_override: dict[str, Any] = {}
+        if override_dict:
+            for key, value in override_dict.items():
+                processed_override[key] = self._substitute_field_references(value, all_args)
+
+        # Combine args and overrides first (override takes precedence)
+        combined_args = {**all_args, **processed_override}
+
+        # Filter to only include parameters that match the pattern's field names
+        filtered_args: dict[str, Any] = {}
+        if params:
+            # Only include args that match the pattern's parameters
+            filtered_args = {k: v for k, v in combined_args.items() if k in params}
+            # Check that all required parameters are present (simplified since we combined args and override)
+            for param in params:
+                if param not in filtered_args:
+                    raise UserError(
+                        f'Pattern "{pattern}" requires argument "{param}" but was not provided in args or override dict'
+                    )
+        # If no params in pattern, filtered_args remains empty
+
+        return filtered_args
+
+    def _resolve_dependency(self, dep: DepSpec, all_args: dict[str, Any]) -> tuple[str, dict[str, Any], bool]:
+        """
+        Resolve a dependency specification to (dep_pattern, filtered_args, is_proto_ref).
+        
+        - If dep is a string, extract [field] patterns and filter args
+        - If dep is a tuple[str, dict], use the string as pattern and merge the dict as overrides
+        - Returns (dep_pattern, filtered_and_overridden_args, is_proto_ref)
+          where is_proto_ref indicates if this is a @ proto reference
+        """
+        # Handle tuple format: (dep_pattern, override_dict)
+        if isinstance(dep, tuple):
+            dep_pattern, override_dict = dep
+            if not isinstance(dep_pattern, str):
+                raise UserError(f'Dependency tuple first element must be str, got {type(dep_pattern)}')
+            if not isinstance(override_dict, dict):
+                raise UserError(f'Dependency tuple second element must be dict, got {type(override_dict)}')
+        else:
+            dep_pattern = dep
+            override_dict = {}
+
+        # Check if this is a proto reference
+        is_proto_ref = dep_pattern.startswith('@')
+
+        # For @ dependencies, extract params from pattern without @ prefix
+        pattern_for_params = dep_pattern[1:] if is_proto_ref else dep_pattern
+
+        # Use combined function to extract params, filter args, and apply overrides
+        final_args = self._process_pattern_and_args(pattern_for_params, all_args, override_dict)
+
+        return (dep_pattern, final_args, is_proto_ref)
+
+    def _resolve_proto_dependencies(self, proto: 'Proto', all_args: dict[str, Any]) -> list[str]:
+        """
+        Resolve all dependencies for a proto.
+        
+        Two-pass resolution:
+        1. First pass: expand all callable (lambda) dependencies - they can return DepSpec or list[DepSpec]
+        2. Second pass: resolve each dep (extract fields, filter args, handle tuples, generate names), then handle @ dependencies
+        
+        Returns:
+            List of resolved dependency names (proc names, not proto patterns)
+        """
+        # First pass: expand all callable (lambda) dependencies
+        expanded_deps: list[DepSpec] = []
+        for dep in proto.deps:
+            if callable(dep):
+                # Lambda dependency: call with ProcManager context and filtered proc params
+                # Inspect lambda signature to only pass expected parameters
+                sig = inspect.signature(dep)
+                param_names = set(sig.parameters.keys())
+                # Remove 'manager' if present (it's passed as first positional arg)
+                param_names.discard('manager')
+                # Filter all_args to only include parameters the lambda expects
+                filtered_lambda_args = {k: v for k, v in all_args.items() if k in param_names}
+                dep_result = dep(self, **filtered_lambda_args)
+                # Expand result into deps array
+                if isinstance(dep_result, list):
+                    # Validate list items are DepSpec
+                    for item in dep_result:
+                        if not isinstance(item, (str, tuple)):
+                            raise UserError(f'Lambda dependency list item must be str or tuple[str, dict], got {type(item)}')
+                        if isinstance(item, tuple) and (len(item) != 2 or not isinstance(item[0], str) or not isinstance(item[1], dict)):
+                            raise UserError(f'Lambda dependency tuple must be (str, dict), got {item}')
+                    expanded_deps.extend(dep_result)
+                elif isinstance(dep_result, (str, tuple)):
+                    # Validate tuple format
+                    if isinstance(dep_result, tuple):
+                        if len(dep_result) != 2 or not isinstance(dep_result[0], str) or not isinstance(dep_result[1], dict):
+                            raise UserError(f'Lambda dependency tuple must be (str, dict), got {dep_result}')
+                    expanded_deps.append(dep_result)
+                else:
+                    raise UserError(f'Lambda dependency must return str, tuple[str, dict], or list of these, got {type(dep_result)}')
+            elif isinstance(dep, (str, tuple)):
+                # Validate tuple format
+                if isinstance(dep, tuple):
+                    if len(dep) != 2 or not isinstance(dep[0], str) or not isinstance(dep[1], dict):
+                        raise UserError(f'Dependency tuple must be (str, dict), got {dep}')
+                expanded_deps.append(dep)
+            else:
+                raise UserError(f'Dependency must be str, tuple[str, dict], or callable, got {type(dep)}')
+
+        # Second pass: resolve each dependency (extract fields, filter args, handle tuples, generate names), then handle @ dependencies
+        resolved_deps: list[str] = []
+        for dep in expanded_deps:
+            # Resolve dependency: extract field names, filter args, apply overrides
+            dep_pattern, filtered_args, is_proto_ref = self._resolve_dependency(dep, all_args)
+
+            if is_proto_ref:
+                # Strip @ and call create_proc recursively with filtered args
+                # create_proc will generate the proc name from the pattern and args
+                dep_proto_pattern = dep_pattern[1:]  # Remove @ prefix
+                resolved_dep_name = self.create_proc(dep_proto_pattern, args=filtered_args)
+                resolved_deps.append(resolved_dep_name)
+            else:
+                # Regular dependency: only generate name if pattern has [field] placeholders
+                param_pattern = r'\[([^\]]+)\]'
+                has_params = bool(re.findall(param_pattern, dep_pattern))
+                if has_params:
+                    # Pattern has [field] placeholders, generate the name
+                    resolved_dep_name = self._generate_name_from_pattern(dep_pattern, filtered_args)
+                    resolved_deps.append(resolved_dep_name)
+                else:
+                    # Pattern has no placeholders, use as-is
+                    resolved_deps.append(dep_pattern)
+
+        return resolved_deps
+
     # Create a proc from a proto
     def create_proc(self, proto_name: str, proc_name: str | None = None, args: dict[str, Any] | None = None) -> str:
         proto = self.protos.get(proto_name, None)
         if proto is None:
             raise UserError(f'Proto "{proto_name}" is undefined')
-
-        # Find all [key] patterns in the proto name to determine which parameters are needed
-        pattern = r'\[([^\]]+)\]'
-        proto_params = set(re.findall(pattern, proto_name))
 
         # Proto args are defaults, but can be overridden by specified args
         all_args: dict[str, Any] = {}
@@ -149,48 +371,19 @@ class ProcManager:
         if args:
             all_args.update(args)
 
-        # Filter proc_args to only include parameters that are actually used in the proto name
-        proc_args: dict[str, Any] = {}
-        if proto_params:
-            # Only include args that match the proto's parameters
-            proc_args = {k: v for k, v in all_args.items() if k in proto_params}
-        # If no params in proto name, proc_args remains empty (no args passed)
+        # Process pattern: extract params, filter args
+        proc_args = self._process_pattern_and_args(proto_name, all_args)
 
-        # Create proc_name from proto_name and filtered args
+        # Generate proc_name from proto_name pattern and filtered args if not provided
         if proc_name is None:
-            proc_name = proto_name
-            for key in proto_params:
-                if key in proc_args:
-                    # Replace [key] with the value from args
-                    proc_name = proc_name.replace(f'[{key}]', str(proc_args[key]))
-                else:
-                    # Key not found in args
-                    raise UserError(f'Proto "{proto_name}" requires argument "{key}" but was not provided')
+            proc_name = self._generate_name_from_pattern(proto_name, proc_args)
 
         # If proc_name already exists after substitution, return existing proc
         if proc_name is not None and proc_name in self.procs:
             return proc_name
 
-        # if proc_name is None:
-        #     # Very simple way to find new proc_name.. Could be slow though
-        #     i = 0
-        #     while True:
-        #         proc_name = proto_name + ':' + str(i)
-        #         if proc_name not in self.procs:
-        #             break
-        #         i += 1
-
-        # Resolve dependencies: if any dependency has @ in front, strip @, call create_proc on it
-        resolved_deps: list[str] = []
-        for dep in proto.deps:
-            if dep.startswith('@'):
-                # Strip @ and call create_proc recursively
-                # create_proc will filter args based on the child proto's parameters
-                dep_proto_name = dep[1:]  # Remove @ prefix
-                resolved_dep_name = self.create_proc(dep_proto_name, args=all_args)
-                resolved_deps.append(resolved_dep_name)
-            else:
-                resolved_deps.append(dep)
+        # Resolve dependencies
+        resolved_deps = self._resolve_proto_dependencies(proto, all_args)
 
         # Create proc based on prototype
         proc = Proc(
@@ -529,13 +722,14 @@ class ProcContext:
 class Proto:
     """Decorator for process prototypes. These can be parameterized and instantiated again and again
     deps: prefix with @ to reference a proto. Will be created if not found.
+         Can be str, tuple[str, dict[str, Any]], or callable returning these.
     """
 
     def __init__(
         self,
         name: str | None = None,
         f: F | None = None,
-        deps: list[str] | None = None,
+        deps: list[DepInput] | None = None,
         locks: list[str] | None = None,
         now: bool = False,
         args: dict[str, Any] | None = None,
