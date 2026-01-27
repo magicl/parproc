@@ -184,49 +184,46 @@ class ProcManager:
         # If no params in pattern, filtered_args remains empty
 
         # Cast args based on function signature if func provided
-        if func is not None:
-            # Type assertion: func is not None here, helps type checkers
-            assert func is not None  # For type checking
-            try:
-                sig = inspect.signature(func)
-                cast_args = {}
-                for param_name, param_value in filtered_args.items():
-                    if param_name in sig.parameters:
-                        param = sig.parameters[param_name]
-                        param_type = param.annotation
-                        
-                        # If type annotation exists and is not Any/empty, try to cast
-                        if param_type != inspect.Parameter.empty and param_type != Any:
-                            # Handle common types
-                            if param_type == int:
-                                cast_args[param_name] = int(param_value)
-                            elif param_type == float:
-                                cast_args[param_name] = float(param_value)
-                            elif param_type == bool:
-                                # Handle string booleans
-                                if isinstance(param_value, str):
-                                    cast_args[param_name] = param_value.lower() in ('true', '1', 'yes', 'on')
-                                else:
-                                    cast_args[param_name] = bool(param_value)
-                            elif param_type == str:
-                                cast_args[param_name] = str(param_value)
+        try:
+            sig = inspect.signature(func)
+            cast_args = {}
+            for param_name, param_value in filtered_args.items():
+                if param_name in sig.parameters:
+                    param = sig.parameters[param_name]
+                    param_type = param.annotation
+                    
+                    # If type annotation exists and is not Any/empty, try to cast
+                    if param_type != inspect.Parameter.empty and param_type != Any:
+                        # Handle common types
+                        if param_type == int:
+                            cast_args[param_name] = int(param_value)
+                        elif param_type == float:
+                            cast_args[param_name] = float(param_value)
+                        elif param_type == bool:
+                            # Handle string booleans
+                            if isinstance(param_value, str):
+                                cast_args[param_name] = param_value.lower() in ('true', '1', 'yes', 'on')
                             else:
-                                # For other types, try to construct from string
-                                try:
-                                    cast_args[param_name] = param_type(param_value)
-                                except (ValueError, TypeError):
-                                    # If casting fails, use original value
-                                    cast_args[param_name] = param_value
+                                cast_args[param_name] = bool(param_value)
+                        elif param_type == str:
+                            cast_args[param_name] = str(param_value)
                         else:
-                            # No type annotation, use as-is
-                            cast_args[param_name] = param_value
+                            # For other types, try to construct from string
+                            try:
+                                cast_args[param_name] = param_type(param_value)
+                            except (ValueError, TypeError):
+                                # If casting fails, use original value
+                                cast_args[param_name] = param_value
                     else:
-                        # Parameter not in signature, use as-is
+                        # No type annotation, use as-is
                         cast_args[param_name] = param_value
-                filtered_args = cast_args
-            except (ValueError, TypeError):
-                # If signature inspection fails, use args as-is
-                pass
+                else:
+                    # Parameter not in signature, use as-is
+                    cast_args[param_name] = param_value
+            filtered_args = cast_args
+        except (ValueError, TypeError):
+            # If signature inspection fails, use args as-is
+            pass
 
         # Optionally generate the final name from pattern and filtered args
         generated_name: str | None = None
@@ -242,7 +239,7 @@ class ProcManager:
 
         return (filtered_args, generated_name)
 
-    def _resolve_dependency(self, dep: str, all_args: dict[str, Any]) -> tuple[str, dict[str, Any], 'Proto' | None]:
+    def _resolve_dependency(self, dep: str, all_args: dict[str, Any]) -> tuple[str, dict[str, Any], Optional['Proto']]:
         """
         Resolve a dependency specification to (dep_name_or_pattern, filtered_args, matched_proto).
         
@@ -329,8 +326,15 @@ class ProcManager:
             dep_name_or_pattern, filtered_args, matched_proto = self._resolve_dependency(dep, all_args)
 
             if matched_proto is not None:
-                # Found matching proto, create proc
-                resolved_dep_name = self.create_proc(dep_name_or_pattern)
+                # Found matching proto, generate filled-out name from pattern and args, then create proc
+                if matched_proto.name is None:
+                    raise UserError(f'Proto has no name')
+                _, generated_dep_name = self._process_pattern_args_and_generate(
+                    matched_proto.name, filtered_args, matched_proto.func, generate_name=True
+                )
+                if generated_dep_name is None:
+                    raise UserError(f'Failed to generate name for dependency "{dep_name_or_pattern}"')
+                resolved_dep_name = self.create_proc(generated_dep_name)
                 resolved_deps.append(resolved_dep_name)
             else:
                 # No proto match - use as-is (might be a future proc or will error later)
@@ -339,7 +343,7 @@ class ProcManager:
         return resolved_deps
 
 
-    def _find_matching_proto(self, name: str) -> tuple['Proto', dict[str, Any]] | None:
+    def _find_matching_proto(self, name: str) -> Optional[tuple['Proto', dict[str, Any]]]:
         """
         Find a proto that matches the given name (either exact match or pattern match).
         
@@ -368,8 +372,25 @@ class ProcManager:
         else:
             return None
 
-    # Create a proc from a proto
     def create_proc(self, proto_name: str, proc_name: str | None = None) -> str:
+        """
+        Create a proc from a proto.
+        
+        The proto_name can be either:
+        - An exact proto name pattern (e.g., "foo-[x]-[y]") - proc_name must be provided
+        - A filled-out name (e.g., "foo-a-2") - automatically matches proto pattern "foo-[x]-[y]"
+          and extracts x='a', y='2', then generates proc_name
+        
+        Args:
+            proto_name: Either proto pattern or filled-out name that matches a proto pattern
+            proc_name: Optional explicit proc name (required if proto_name is a pattern)
+        
+        Returns:
+            The created proc name (either provided or generated)
+        
+        Raises:
+            UserError: If no matching proto found, or if multiple protos match, or if required args missing
+        """
         # Try to find matching proto (exact match or pattern match)
         match_result = self._find_matching_proto(proto_name)
         if match_result is None:
@@ -743,9 +764,21 @@ class ProcContext:
 
 
 class Proto:
-    """Decorator for process prototypes. These can be parameterized and instantiated again and again
-    deps: Can be str (proc name, proto pattern, or filled-out name like "foo-a-2"), or callable returning str or list[str].
-         Dependencies are matched against proto patterns and created automatically if not found.
+    """Decorator for process prototypes. These can be parameterized and instantiated again and again.
+    
+    Proto names can contain [field] placeholders (e.g., "foo-[x]-[y]") which are replaced with
+    actual values when creating procs. You can create procs using either:
+    - The proto pattern: create_proc('foo-[x]-[y]') - requires proc_name to be provided
+    - A filled-out name: create_proc('foo-a-2') - automatically extracts x='a', y='2' from the name
+    
+    Dependencies can be:
+    - Existing proc names (strings)
+    - Proto patterns (e.g., "dep-[x]-[y]") - extracts matching args from parent proc's args
+    - Filled-out names (e.g., "dep-test-42") - automatically matches proto pattern and creates proc
+    - Callables (lambdas) that return str or list[str] - called with manager and proc args
+    
+    Dependencies are automatically matched against proto patterns and created if not found.
+    Type casting is performed automatically based on the proto function's type annotations.
     """
 
     def __init__(

@@ -62,8 +62,10 @@ class ProtoTest(TestCase):
 
         pp.wait_clear()
 
-        # Proto short-hand
-        pp.Proto('f0-[x]-[y]', lambda c, x, y: x * y, now=True)
+        # Proto short-hand - need type annotations for casting
+        def f0_func(context: pp.ProcContext, x: int, y: int) -> int:
+            return x * y
+        pp.Proto('f0-[x]-[y]', f0_func, now=True)
 
         # Proc short-hand
         pp.Proc('f1', lambda c: 10, now=True)
@@ -123,8 +125,8 @@ class ProtoTest(TestCase):
             time.sleep(0.1)  # Small delay to ensure ordering
             return f'dep_{value}'
 
-        # Define a proto that depends on dep_proto using @ prefix
-        @pp.Proto(name='main_proto-[value]', deps=['dep_proto-[value]'])
+        # Define a proto that depends on dep_proto - pattern dependency extracts value from parent
+        @pp.Proto(name='main_proto-[value]', deps=['dep_proto-[value]'], args={'value': 'test'})
         def main_proto(context, value):
             # This should only run after dep_proto completes. Value should be available
             # both under full name and template name
@@ -265,14 +267,17 @@ class ProtoTest(TestCase):
         self.assertEqual(results['dep-test-123'], 'dep_test_123')
         self.assertEqual(results['main-test'], 'main_test_dep_test_123')
 
-    def test_process_pattern_and_args_filters_correctly(self):
-        """Test that _process_pattern_and_args only includes matching parameters"""
+    def test_process_pattern_args_and_generate_filters_correctly(self):
+        """Test that _process_pattern_args_and_generate only includes matching parameters"""
         manager = pp.ProcManager.get_inst()
         manager.clear()
 
+        def test_func(context: pp.ProcContext, x: str, y: int) -> str:
+            return 'test'
+
         # Pattern requires x and y, but we provide x, y, a, b, c
         all_args = {'x': 'test', 'y': 42, 'a': 'A', 'b': 'B', 'c': 100}
-        filtered = manager._process_pattern_and_args('dep-[x]-[y]', all_args)
+        filtered, _ = manager._process_pattern_args_and_generate('dep-[x]-[y]', all_args, test_func)
 
         # Should only have x and y, not a, b, c
         self.assertEqual(filtered, {'x': 'test', 'y': 42})
@@ -421,7 +426,8 @@ class ProtoTest(TestCase):
                 'str_dep-[x]',  # Pattern dependency (will use x from args)
                 'tuple_dep-789',  # Filled-out name
                 lambda manager, value: f'lambda_dep-lambda_{value}',  # Lambda returning filled-out name
-            ]
+            ],
+            args={'x': 'test'}  # Provide x for str_dep-[x] dependency
         )
         def main_proc(context: pp.ProcContext, value: str) -> str:
             str_result = context.results.get('str_dep-test')
@@ -439,50 +445,66 @@ class ProtoTest(TestCase):
         self.assertEqual(results['lambda_dep-lambda_test'], 'lambda_lambda_test')
         self.assertEqual(results['main-test'], 'main_test_str_test_tuple_789_lambda_lambda_test')
 
-    def test_process_pattern_and_args_missing_field_error(self):
-        """Test that _process_pattern_and_args raises error for missing required fields"""
+    def test_process_pattern_args_and_generate_missing_field_error(self):
+        """Test that _process_pattern_args_and_generate raises error for missing required fields"""
         manager = pp.ProcManager.get_inst()
         manager.clear()
+
+        def test_func(context: pp.ProcContext, x: str, y: int) -> str:
+            return 'test'
 
         # Pattern requires x and y, but only x is provided
         all_args = {'x': 'test', 'value': 'test'}
 
         with self.assertRaises(pp.UserError) as cm:
-            manager._process_pattern_and_args('dep-[x]-[y]', all_args)
+            manager._process_pattern_args_and_generate('dep-[x]-[y]', all_args, test_func)
         self.assertIn('requires argument "y"', str(cm.exception))
 
-    def test_generate_name_from_pattern(self):
-        """Test that _generate_name_from_pattern correctly replaces [field] placeholders"""
+    def test_process_pattern_args_and_generate_name(self):
+        """Test that _process_pattern_args_and_generate correctly generates names"""
         manager = pp.ProcManager.get_inst()
         manager.clear()
+
+        def test_func(context: pp.ProcContext, x: str, y: int) -> str:
+            return 'test'
 
         pattern = 'proto-[x]-[y]'
         args = {'x': 'test', 'y': 42}
-        name = manager._generate_name_from_pattern(pattern, args)
+        filtered_args, generated_name = manager._process_pattern_args_and_generate(
+            pattern, args, test_func, generate_name=True
+        )
 
-        self.assertEqual(name, 'proto-test-42')
+        self.assertEqual(filtered_args, {'x': 'test', 'y': 42})
+        self.assertEqual(generated_name, 'proto-test-42')
 
-    def test_generate_name_from_pattern_missing_arg(self):
-        """Test that _generate_name_from_pattern raises error for missing args"""
+    def test_process_pattern_args_and_generate_missing_arg(self):
+        """Test that _process_pattern_args_and_generate raises error for missing args"""
         manager = pp.ProcManager.get_inst()
         manager.clear()
+
+        def test_func(context: pp.ProcContext, x: str, y: int) -> str:
+            return 'test'
 
         pattern = 'proto-[x]-[y]'
         args = {'x': 'test'}  # Missing y
 
         with self.assertRaises(pp.UserError) as cm:
-            manager._generate_name_from_pattern(pattern, args)
+            manager._process_pattern_args_and_generate(pattern, args, test_func, generate_name=True)
         self.assertIn('requires argument "y"', str(cm.exception))
 
-    def test_resolve_dependency_string(self):
-        """Test _resolve_dependency with string dependency"""
+    def test_resolve_dependency_string_pattern(self):
+        """Test _resolve_dependency with string pattern (no proto match)"""
         manager = pp.ProcManager.get_inst()
         manager.clear()
+
+        def test_func(context: pp.ProcContext, x: str, y: int) -> str:
+            return 'test'
 
         all_args = {'x': 'test', 'y': 42, 'value': 'ignored'}
         dep_pattern, filtered_args, matched_proto = manager._resolve_dependency('dep-[x]-[y]', all_args)
 
         self.assertEqual(dep_pattern, 'dep-[x]-[y]')
+        # Should filter to only x and y
         self.assertEqual(filtered_args, {'x': 'test', 'y': 42})
         self.assertIsNone(matched_proto)  # No proto match for pattern
 
@@ -517,17 +539,123 @@ class ProtoTest(TestCase):
 
         @pp.Proto(
             name='main-[value]',
-            deps=['dep-[x]-[y]']  # Requires x and y
+            deps=['dep-[x]-[y]'],  # Pattern dependency - requires x and y from parent args
+            args={'x': 'test'}  # Only provide x, y is missing
         )
         def main_proc(context: pp.ProcContext, value: str) -> str:
             return 'main'
 
-        # Should raise error because y is missing when trying to create dep
-        # But actually, if we use a filled-out name for main, it should work
-        # The error would occur when trying to resolve the dependency
-        proc_name = pp.create('main-test')
-        pp.start(proc_name)
-        # This should fail because dep-[x]-[y] requires both x and y but we only have x from main's args
+        # Should raise error because y is missing when resolving dependency
         with self.assertRaises(pp.UserError) as cm:
-            pp.wait(proc_name)
+            pp.create('main-test')
         self.assertIn('requires argument "y"', str(cm.exception))
+
+    def test_filled_out_name_matching(self):
+        """Test that filled-out names automatically match proto patterns and extract params"""
+
+        pp.wait_clear()
+
+        @pp.Proto(name='task-[id]-[status]')
+        def task_proc(context: pp.ProcContext, id: int, status: str) -> str:
+            return f'task_{id}_{status}'
+
+        # Create using filled-out name - should extract id=123, status='done'
+        proc_name = pp.create('task-123-done')
+        pp.start(proc_name)
+        pp.wait(proc_name)
+
+        results = pp.results()
+        self.assertEqual(results['task-123-done'], 'task_123_done')
+
+    def test_filled_out_name_type_casting(self):
+        """Test that extracted params are cast to correct types based on function signature"""
+
+        pp.wait_clear()
+
+        @pp.Proto(name='calc-[a]-[b]')
+        def calc_proc(context: pp.ProcContext, a: int, b: float) -> float:
+            # Verify types are correct
+            self.assertIsInstance(a, int)
+            self.assertIsInstance(b, float)
+            return a + b
+
+        # Create using filled-out name - params extracted as strings, then cast to int/float
+        proc_name = pp.create('calc-10-20.5')
+        pp.start(proc_name)
+        pp.wait(proc_name)
+
+        results = pp.results()
+        self.assertEqual(results['calc-10-20.5'], 30.5)
+
+    def test_multiple_proto_match_error(self):
+        """Test that matching multiple protos raises an error"""
+
+        pp.wait_clear()
+
+        @pp.Proto(name='foo-[x]')
+        def foo1(context: pp.ProcContext, x: str) -> str:
+            return f'foo1_{x}'
+
+        @pp.Proto(name='foo-[y]')
+        def foo2(context: pp.ProcContext, y: str) -> str:
+            return f'foo2_{y}'
+
+        # Both protos match "foo-test" - should raise error
+        with self.assertRaises(pp.UserError) as cm:
+            pp.create('foo-test')
+        self.assertIn('matches multiple protos', str(cm.exception))
+
+    def test_dependency_filled_out_name_auto_create(self):
+        """Test that dependencies with filled-out names automatically create procs"""
+
+        pp.wait_clear()
+
+        @pp.Proto(name='worker-[id]')
+        def worker_proc(context: pp.ProcContext, id: int) -> str:
+            return f'worker_{id}'
+
+        @pp.Proto(
+            name='manager-[name]',
+            deps=['worker-1', 'worker-2']  # Filled-out names that should auto-create
+        )
+        def manager_proc(context: pp.ProcContext, name: str) -> str:
+            w1 = context.results.get('worker-1')
+            w2 = context.results.get('worker-2')
+            return f'manager_{name}_{w1}_{w2}'
+
+        proc_name = pp.create('manager-alice')
+        pp.start(proc_name)
+        pp.wait(proc_name)
+
+        results = pp.results()
+        # Verify workers were created automatically
+        self.assertIn('worker-1', results)
+        self.assertIn('worker-2', results)
+        self.assertEqual(results['manager-alice'], 'manager_alice_worker_1_worker_2')
+
+    def test_dependency_pattern_extracts_from_parent_args(self):
+        """Test that dependency patterns extract matching args from parent proc"""
+
+        pp.wait_clear()
+
+        @pp.Proto(name='helper-[x]-[y]')
+        def helper_proc(context: pp.ProcContext, x: str, y: int) -> str:
+            return f'helper_{x}_{y}'
+
+        @pp.Proto(
+            name='main-[a]-[b]',
+            deps=['helper-[x]-[y]'],  # Pattern - should extract x and y from main's args
+            args={'x': 'test', 'y': 42, 'z': 'ignored'}  # z should be ignored
+        )
+        def main_proc(context: pp.ProcContext, a: str, b: str) -> str:
+            helper_result = context.results.get('helper-test-42')
+            return f'main_{a}_{b}_{helper_result}'
+
+        proc_name = pp.create('main-A-B')
+        pp.start(proc_name)
+        pp.wait(proc_name)
+
+        results = pp.results()
+        # Verify helper only got x and y, not a, b, or z
+        self.assertEqual(results['helper-test-42'], 'helper_test_42')
+        self.assertEqual(results['main-A-B'], 'main_A_B_helper_test_42')
