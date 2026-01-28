@@ -743,3 +743,170 @@ class ProtoTest(TestCase):
         # Verify helper only got x and y, not a, b, or z
         self.assertEqual(results['helper-test-42'], 'helper_test_42')
         self.assertEqual(results['main-A-B'], 'main_A_B_helper_test_42')
+
+    def test_rdeps_basic(self):
+        """Test basic rdeps functionality - proc with rdep gets injected as dependency"""
+
+        pp.wait_clear()
+
+        @pp.Proc(name='setup', rdeps=['B-[a]-[b]'])
+        def setup_proc(context: pp.ProcContext) -> str:
+            return 'setup_done'
+
+        @pp.Proto(name='B-[a]-[b]')
+        def b_proc(context: pp.ProcContext, a: str, b: int) -> str:
+            return f'B_{a}_{b}'
+
+        # Create and start B proc - setup should be injected as dependency
+        proc_name = pp.create('B-test-2')
+        pp.start(proc_name)
+        pp.wait(proc_name)
+
+        results = pp.results()
+        # Verify setup ran first (it's a dependency of B)
+        self.assertIn('setup', results)
+        self.assertIn('B-test-2', results)
+        self.assertEqual(results['setup'], 'setup_done')
+        self.assertEqual(results['B-test-2'], 'B_test_2')
+
+    def test_rdeps_pattern_matching(self):
+        """Test rdep pattern matching with various patterns"""
+
+        # Test 1: B-something-2 should match B-[a]-[b] (setup1) but not others
+        pp.wait_clear()
+
+        @pp.Proc(name='setup1', rdeps=['B-[a]-[b]'])
+        def setup1(context: pp.ProcContext) -> str:
+            return 'setup1'
+
+        @pp.Proc(name='setup2', rdeps=['B-1-[b]'])
+        def setup2(context: pp.ProcContext) -> str:
+            return 'setup2'
+
+        @pp.Proc(name='setup3', rdeps=['B-[a]-2'])
+        def setup3(context: pp.ProcContext) -> str:
+            return 'setup3'
+
+        @pp.Proc(name='setup4', rdeps=['B-1-2'])
+        def setup4(context: pp.ProcContext) -> str:
+            return 'setup4'
+
+        @pp.Proto(name='B-[a]-[b]')
+        def b_proc(context: pp.ProcContext, a: str, b: int) -> str:
+            return f'B_{a}_{b}'
+
+        proc_name = pp.create('B-something-2')
+        pp.start(proc_name)
+        pp.wait(proc_name)
+        results = pp.results()
+        self.assertIn('setup1', results)  # B-[a]-[b] matches B-something-2
+        self.assertNotIn('setup2', results)  # B-1-[b] doesn't match (1 != something)
+        self.assertIn('setup3', results)  # B-[a]-2 matches B-something-2 (2 == 2)
+        self.assertNotIn('setup4', results)  # B-1-2 doesn't match (1 != something)
+
+        # Test 2: B-1-2 should match B-[a]-[b] (setup1), B-1-[b] (setup2), B-[a]-2 (setup3), and B-1-2 (setup4)
+        pp.wait_clear()
+
+        @pp.Proc(name='setup1_v2', rdeps=['B-[a]-[b]'])
+        def setup1_v2(context: pp.ProcContext) -> str:
+            return 'setup1'
+
+        @pp.Proc(name='setup2_v2', rdeps=['B-1-[b]'])
+        def setup2_v2(context: pp.ProcContext) -> str:
+            return 'setup2'
+
+        @pp.Proc(name='setup3_v2', rdeps=['B-[a]-2'])
+        def setup3_v2(context: pp.ProcContext) -> str:
+            return 'setup3'
+
+        @pp.Proc(name='setup4_v2', rdeps=['B-1-2'])
+        def setup4_v2(context: pp.ProcContext) -> str:
+            return 'setup4'
+
+        @pp.Proto(name='B-[a]-[b]')
+        def b_proc_v2(context: pp.ProcContext, a: str, b: int) -> str:
+            return f'B_{a}_{b}'
+
+        proc_name = pp.create('B-1-2')
+        pp.start(proc_name)
+        pp.wait(proc_name)
+        results = pp.results()
+        self.assertIn('setup1_v2', results)
+        self.assertIn('setup2_v2', results)
+        self.assertIn('setup3_v2', results)
+        self.assertIn('setup4_v2', results)
+
+        # Test 3: B-1-3 should match B-[a]-[b] (setup1) and B-1-[b] (setup2), but not B-[a]-2 (setup3) or B-1-2 (setup4)
+        pp.wait_clear()
+
+        @pp.Proc(name='setup1_v3', rdeps=['B-[a]-[b]'])
+        def setup1_v3(context: pp.ProcContext) -> str:
+            return 'setup1'
+
+        @pp.Proc(name='setup2_v3', rdeps=['B-1-[b]'])
+        def setup2_v3(context: pp.ProcContext) -> str:
+            return 'setup2'
+
+        @pp.Proc(name='setup3_v3', rdeps=['B-[a]-2'])
+        def setup3_v3(context: pp.ProcContext) -> str:
+            return 'setup3'
+
+        @pp.Proc(name='setup4_v3', rdeps=['B-1-2'])
+        def setup4_v3(context: pp.ProcContext) -> str:
+            return 'setup4'
+
+        @pp.Proto(name='B-[a]-[b]')
+        def b_proc_v3(context: pp.ProcContext, a: str, b: int) -> str:
+            return f'B_{a}_{b}'
+
+        proc_name = pp.create('B-1-3')
+        pp.start(proc_name)
+        pp.wait(proc_name)
+        results = pp.results()
+        self.assertIn('setup1_v3', results)
+        self.assertIn('setup2_v3', results)
+        self.assertNotIn('setup3_v3', results)  # B-[a]-2 doesn't match B-1-3 (2 != 3)
+        self.assertNotIn('setup4_v3', results)  # B-1-2 doesn't match B-1-3 (2 != 3)
+
+    def test_rdeps_proto(self):
+        """Test rdeps with proto - proto should create proc when rdep matches"""
+
+        pp.wait_clear()
+
+        @pp.Proto(name='setup-[env]', rdeps=['B-[a]-[b]'])
+        def setup_proto(context: pp.ProcContext, env: str) -> str:
+            return f'setup_{env}'
+
+        @pp.Proto(name='B-[a]-[b]')
+        def b_proc(context: pp.ProcContext, a: str, b: int) -> str:
+            return f'B_{a}_{b}'
+
+        # Create B proc - setup proto has rdep matching B, but setup proto pattern doesn't match B name
+        # So setup won't be created automatically
+        proc_name = pp.create('B-test-2')
+        pp.start(proc_name)
+        pp.wait(proc_name)
+        results = pp.results()
+        # setup won't be created because B-test-2 doesn't match setup-[env] pattern
+        self.assertNotIn('setup-test', results)
+        self.assertIn('B-test-2', results)
+
+        # But if we create setup-test, and then start B-test-2, setup-test should be injected
+        pp.wait_clear()
+
+        @pp.Proto(name='setup-[env]', rdeps=['B-[a]-[b]'])
+        def setup_proto_v2(context: pp.ProcContext, env: str) -> str:
+            return f'setup_{env}'
+
+        @pp.Proto(name='B-[a]-[b]')
+        def b_proc_v2(context: pp.ProcContext, a: str, b: int) -> str:
+            return f'B_{a}_{b}'
+
+        setup_name = pp.create('setup-test')
+        proc_name = pp.create('B-test-2')
+        pp.start(proc_name)
+        pp.wait(proc_name)
+        results = pp.results()
+        # setup-test should be injected as dependency
+        self.assertIn('setup-test', results)
+        self.assertIn('B-test-2', results)

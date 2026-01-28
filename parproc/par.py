@@ -132,6 +132,129 @@ class ProcManager:
         for n in names:
             self.start_proc(n)
 
+    def _match_rdep_pattern(self, rdep_pattern: str, proc_name: str) -> bool:
+        """
+        Check if a proc name matches an rdep pattern.
+        
+        An rdep pattern can contain:
+        - Placeholders like [a] that match any value
+        - Literal values that must match exactly
+        
+        Examples:
+        - Pattern "B-[a]-[b]" matches "B-something-2" (a="something", b="2")
+        - Pattern "B-1-[b]" matches "B-1-2" (b="2") but NOT "B-something-2"
+        - Pattern "B-[a]-3" matches "B-something-3" but NOT "B-something-2"
+        - Pattern "B-1-2" matches "B-1-2" exactly
+        
+        Args:
+            rdep_pattern: Pattern with optional [param] placeholders
+            proc_name: Actual proc name to match against
+            
+        Returns:
+            True if pattern matches proc_name, False otherwise
+        """
+        # Find all [param] patterns
+        param_pattern = r'\[([^\]]+)\]'
+        params = re.findall(param_pattern, rdep_pattern)
+        
+        if not params:
+            # No placeholders, exact match required
+            return rdep_pattern == proc_name
+        
+        # Build regex pattern similar to _build_regex_pattern
+        # Split on [param] markers
+        parts = re.split(r'(\[[^\]]+\])', rdep_pattern)
+        
+        pattern_parts = []
+        param_index = 0
+        
+        for i, part in enumerate(parts):
+            if not part:
+                continue
+            if part.startswith('[') and part.endswith(']'):
+                # This is a parameter marker - match any non-empty sequence
+                # Check if there's any literal text after this parameter
+                has_literal_after = any(
+                    not p.startswith('[') and not p.endswith(']') and p
+                    for p in parts[i + 1:]
+                )
+                if param_index == len(params) - 1 and not has_literal_after:
+                    # Last parameter and no literals after: match everything to end
+                    pattern_parts.append('.*')
+                else:
+                    # Not last, or has literals after: match non-empty sequence (greedy, constrained by next literal)
+                    pattern_parts.append('[^-]+')
+                param_index += 1
+            else:
+                # Literal text, escape it
+                pattern_parts.append(re.escape(part))
+        
+        regex_str = '^' + ''.join(pattern_parts) + '$'
+        regex = re.compile(regex_str)
+        return bool(regex.match(proc_name))
+
+    def _resolve_rdeps(self, proc_name: str) -> list[str]:
+        """
+        Find all protos and procs that have rdeps matching the given proc name.
+        
+        When an rdep matches:
+        - If it's a proto: try to create a proc from it (if proc_name matches proto pattern)
+        - If it's an existing proc: add it as a dependency
+        
+        Args:
+            proc_name: Name of the proc being started
+            
+        Returns:
+            List of proc names that should be injected as dependencies
+        """
+        matching_rdeps: list[str] = []
+        
+        # Check all protos for matching rdeps
+        for proto in self.protos.values():
+            for rdep in proto.rdeps:
+                if self._match_rdep_pattern(rdep, proc_name):
+                    # Found a matching rdep - need to create a proc from this proto
+                    if proto.name is None:
+                        continue
+                    
+                    # Try to match proc_name against proto pattern to extract args
+                    # This allows creating a proc from proto when proc_name matches proto's pattern
+                    extracted = proto.match_and_extract(proc_name)
+                    if extracted is not None:
+                        # proc_name matches proto pattern - create proc using proc_name directly
+                        if proc_name not in self.procs:
+                            try:
+                                created_name = self.create_proc(proc_name)
+                                matching_rdeps.append(created_name)
+                            except UserError:
+                                # Failed to create proc (e.g., missing args), skip it
+                                logger.debug(f'Failed to create proc from proto "{proto.name}" with rdep "{rdep}" matching "{proc_name}"')
+                                pass
+                    else:
+                        # proc_name doesn't match proto pattern - try to create proc from proto name
+                        # If proto name is a pattern, we can't create without args, so skip
+                        param_pattern = r'\[([^\]]+)\]'
+                        if not re.search(param_pattern, proto.name):
+                            # Proto name is exact (no pattern) - create proc from it
+                            if proto.name not in self.procs:
+                                try:
+                                    created_name = self.create_proc(proto.name)
+                                    matching_rdeps.append(created_name)
+                                except UserError:
+                                    # Failed to create proc, skip it
+                                    logger.debug(f'Failed to create proc from proto "{proto.name}" with rdep "{rdep}" matching "{proc_name}"')
+                                    pass
+        
+        # Check all existing procs for matching rdeps
+        for proc in self.procs.values():
+            for rdep in proc.rdeps:
+                if self._match_rdep_pattern(rdep, proc_name):
+                    # Found a matching rdep - add this proc as a dependency
+                    if proc.name is not None and proc.name not in matching_rdeps:
+                        matching_rdeps.append(proc.name)
+        
+        return matching_rdeps
+
     # Schedules a proc for execution
     def start_proc(self, name: str) -> None:
         p = self.procs[name]
@@ -139,6 +262,14 @@ class ProcManager:
         if p.state == ProcState.IDLE:
             logger.debug(f'SCHED: "{p.name}"')
             p.state = ProcState.WANTED
+
+            # Resolve rdeps - find any protos/procs that have rdeps matching this proc
+            matching_rdeps = self._resolve_rdeps(name)
+            # Inject matching rdeps as dependencies
+            for rdep_proc_name in matching_rdeps:
+                if rdep_proc_name not in p.deps:
+                    logger.debug(f'Injecting rdep "{rdep_proc_name}" as dependency of "{p.name}"')
+                    p.deps.append(rdep_proc_name)
 
             # Check if any dependencies have a higher wave than current proc - this could cause deadlock
             for d in p.deps:
@@ -531,6 +662,7 @@ class ProcManager:
         proc = Proc(
             name=proc_name,
             deps=resolved_deps,
+            rdeps=proto.rdeps,
             locks=proto.locks,
             now=proto.now,
             args=proc_args,
@@ -909,6 +1041,7 @@ class Proto:
         name: str | None = None,
         f: F | None = None,
         deps: list[DepInput] | None = None,
+        rdeps: list[str] | None = None,
         locks: list[str] | None = None,
         now: bool = False,
         args: dict[str, Any] | None = None,
@@ -925,6 +1058,7 @@ class Proto:
             )
 
         self.deps = deps if deps is not None else []
+        self.rdeps = rdeps if rdeps is not None else []
         self.locks = locks if locks is not None else []
         self.now = now  # Whether proc will start once created
         self.args = args if args is not None else {}
@@ -1044,6 +1178,7 @@ class Proc:
         f: F | None = None,
         *,
         deps: list[str] | None = None,
+        rdeps: list[str] | None = None,
         locks: list[str] | None = None,
         now: bool = False,
         args: dict[str, Any] | None = None,
@@ -1054,6 +1189,7 @@ class Proc:
         # Input properties
         self.name = name
         self.deps = deps if deps is not None else []
+        self.rdeps = rdeps if rdeps is not None else []
         self.locks = locks if locks is not None else []
         self.now = now
         self.args = args if args is not None else {}
