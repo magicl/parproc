@@ -167,17 +167,19 @@ class ProcManager:
 
     def _cast_single_arg(self, param_type: type, param_value: Any) -> Any:
         """Cast a single argument value to the specified type."""
+        # Handle common built-in types
         if param_type == int:
             return int(param_value)
         if param_type == float:
             return float(param_value)
+        if param_type == str:
+            return str(param_value)
         if param_type == bool:
             # Handle string booleans
             if isinstance(param_value, str):
                 return param_value.lower() in ('true', '1', 'yes', 'on')
             return bool(param_value)
-        if param_type == str:
-            return str(param_value)
+        
         # For other types, try to construct from string
         try:
             return param_type(param_value)
@@ -968,6 +970,8 @@ class Proto:
         Returns:
             Dict of extracted parameters if match, None otherwise
         """
+        if self.regex_pattern is None:
+            return None
         match = self.regex_pattern.match(name)
         if not match:
             return None
