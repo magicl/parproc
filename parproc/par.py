@@ -230,7 +230,6 @@ class ProcManager:
                                 logger.debug(
                                     f'Failed to create proc from proto "{proto.name}" with rdep "{rdep}" matching "{proc_name}"'
                                 )
-                                pass
                     else:
                         # proc_name doesn't match proto pattern - try to create proc from proto name
                         # If proto name is a pattern, we can't create without args, so skip
@@ -246,7 +245,6 @@ class ProcManager:
                                     logger.debug(
                                         f'Failed to create proc from proto "{proto.name}" with rdep "{rdep}" matching "{proc_name}"'
                                     )
-                                    pass
 
         # Check all existing procs for matching rdeps
         for proc in self.procs.values():

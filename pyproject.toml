@@ -86,3 +86,6 @@ dev = [
     "mypy>=1.14.1",
     "parameterized>=0.9.0",
 ]
+
+[tool.pylint."messages control"]
+disable = "too-many-lines,too-many-nested-blocks,too-many-return-statements,too-many-locals"
