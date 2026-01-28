@@ -71,7 +71,9 @@ class ProcManager:
         self.missing_deps: dict[str, bool] = {}
         self.allow_missing_deps = True
 
-    def set_options(self, parallel: int | None = None, dynamic: bool | None = None, allow_missing_deps: bool | None = None) -> None:
+    def set_options(
+        self, parallel: int | None = None, dynamic: bool | None = None, allow_missing_deps: bool | None = None
+    ) -> None:
         """
         Parallel: Number of parallel running processes
         allow_missing_deps: If False, raise error when missing dependency is detected (default: False)
@@ -135,49 +137,46 @@ class ProcManager:
     def _match_rdep_pattern(self, rdep_pattern: str, proc_name: str) -> bool:
         """
         Check if a proc name matches an rdep pattern.
-        
+
         An rdep pattern can contain:
         - Placeholders like [a] that match any value
         - Literal values that must match exactly
-        
+
         Examples:
         - Pattern "B-[a]-[b]" matches "B-something-2" (a="something", b="2")
         - Pattern "B-1-[b]" matches "B-1-2" (b="2") but NOT "B-something-2"
         - Pattern "B-[a]-3" matches "B-something-3" but NOT "B-something-2"
         - Pattern "B-1-2" matches "B-1-2" exactly
-        
+
         Args:
             rdep_pattern: Pattern with optional [param] placeholders
             proc_name: Actual proc name to match against
-            
+
         Returns:
             True if pattern matches proc_name, False otherwise
         """
         # Find all [param] patterns
         param_pattern = r'\[([^\]]+)\]'
         params = re.findall(param_pattern, rdep_pattern)
-        
+
         if not params:
             # No placeholders, exact match required
             return rdep_pattern == proc_name
-        
+
         # Build regex pattern similar to _build_regex_pattern
         # Split on [param] markers
         parts = re.split(r'(\[[^\]]+\])', rdep_pattern)
-        
+
         pattern_parts = []
         param_index = 0
-        
+
         for i, part in enumerate(parts):
             if not part:
                 continue
             if part.startswith('[') and part.endswith(']'):
                 # This is a parameter marker - match any non-empty sequence
                 # Check if there's any literal text after this parameter
-                has_literal_after = any(
-                    not p.startswith('[') and not p.endswith(']') and p
-                    for p in parts[i + 1:]
-                )
+                has_literal_after = any(not p.startswith('[') and not p.endswith(']') and p for p in parts[i + 1 :])
                 if param_index == len(params) - 1 and not has_literal_after:
                     # Last parameter and no literals after: match everything to end
                     pattern_parts.append('.*')
@@ -188,7 +187,7 @@ class ProcManager:
             else:
                 # Literal text, escape it
                 pattern_parts.append(re.escape(part))
-        
+
         regex_str = '^' + ''.join(pattern_parts) + '$'
         regex = re.compile(regex_str)
         return bool(regex.match(proc_name))
@@ -196,19 +195,19 @@ class ProcManager:
     def _resolve_rdeps(self, proc_name: str) -> list[str]:
         """
         Find all protos and procs that have rdeps matching the given proc name.
-        
+
         When an rdep matches:
         - If it's a proto: try to create a proc from it (if proc_name matches proto pattern)
         - If it's an existing proc: add it as a dependency
-        
+
         Args:
             proc_name: Name of the proc being started
-            
+
         Returns:
             List of proc names that should be injected as dependencies
         """
         matching_rdeps: list[str] = []
-        
+
         # Check all protos for matching rdeps
         for proto in self.protos.values():
             for rdep in proto.rdeps:
@@ -216,7 +215,7 @@ class ProcManager:
                     # Found a matching rdep - need to create a proc from this proto
                     if proto.name is None:
                         continue
-                    
+
                     # Try to match proc_name against proto pattern to extract args
                     # This allows creating a proc from proto when proc_name matches proto's pattern
                     extracted = proto.match_and_extract(proc_name)
@@ -228,7 +227,9 @@ class ProcManager:
                                 matching_rdeps.append(created_name)
                             except UserError:
                                 # Failed to create proc (e.g., missing args), skip it
-                                logger.debug(f'Failed to create proc from proto "{proto.name}" with rdep "{rdep}" matching "{proc_name}"')
+                                logger.debug(
+                                    f'Failed to create proc from proto "{proto.name}" with rdep "{rdep}" matching "{proc_name}"'
+                                )
                                 pass
                     else:
                         # proc_name doesn't match proto pattern - try to create proc from proto name
@@ -242,9 +243,11 @@ class ProcManager:
                                     matching_rdeps.append(created_name)
                                 except UserError:
                                     # Failed to create proc, skip it
-                                    logger.debug(f'Failed to create proc from proto "{proto.name}" with rdep "{rdep}" matching "{proc_name}"')
+                                    logger.debug(
+                                        f'Failed to create proc from proto "{proto.name}" with rdep "{rdep}" matching "{proc_name}"'
+                                    )
                                     pass
-        
+
         # Check all existing procs for matching rdeps
         for proc in self.procs.values():
             for rdep in proc.rdeps:
@@ -252,7 +255,7 @@ class ProcManager:
                     # Found a matching rdep - add this proc as a dependency
                     if proc.name is not None and proc.name not in matching_rdeps:
                         matching_rdeps.append(proc.name)
-        
+
         return matching_rdeps
 
     # Schedules a proc for execution
@@ -323,7 +326,7 @@ class ProcManager:
             if isinstance(param_value, str):
                 return param_value.lower() in ('true', '1', 'yes', 'on')
             return bool(param_value)
-        
+
         # For other types, try to construct from string
         try:
             return param_type(param_value)
@@ -1232,7 +1235,11 @@ class Proc:
     def __call__(self, f: F) -> F:
         # Queue is bi-directional queue to provide return value on exit (and maybe other things in the future
         def func(queue_to_proc: mp.Queue, queue_to_master: mp.Queue, context: dict[str, Any], name: str) -> None:
-            # FIX: Wrap function and replace sys.stdout and sys.stderr to capture output
+            # Capture all output (Python and subprocesses) by redirecting at the OS fd level.
+            # Only reassigning sys.stdout/stderr would not capture output from subprocesses
+            # (subprocess.run, Popen, os.system, 'sh' library, etc.) because they inherit
+            # file descriptors 1 and 2 from this process; we must dup2() so those fds
+            # point to the log file before any child is spawned.
             # https://stackoverflow.com/questions/30793624/grabbing-stdout-of-a-function-with-multiprocessing
             logger.info(f'proc "{name}" started')
 
@@ -1240,28 +1247,40 @@ class Proc:
             error = Proc.ERROR_NONE
             ret = None
 
-            # Redirect output to file, one for each process, to keep the output in sequence
             log_filename = os.path.join(str(context['logdir']), name + '.log')
             with open(log_filename, 'w', encoding='utf-8') as log_file:
-                sys.stdout = log_file  # Redirect stdout
-                sys.stderr = log_file
-
+                # Save original stdout/stderr fds so we can restore them
+                saved_stdout_fd = os.dup(1)
+                saved_stderr_fd = os.dup(2)
                 try:
-                    ret = f(pc, **pc.args)  # Execute process
-                except Exception as e:  # Catch all exceptions, so pylint: disable=broad-exception-caught
-                    _, _, tb = sys.exc_info()
-                    info = str(e) + '\n' + ''.join(traceback.format_tb(tb))
+                    # Redirect OS-level fds so subprocesses inherit the log file
+                    log_fd = log_file.fileno()
+                    os.dup2(log_fd, 1)
+                    os.dup2(log_fd, 2)
+                    sys.stdout = log_file
+                    sys.stderr = log_file
 
-                    # Exceptions from 'sh' sometimes have a separate stderr field
-                    stderr = getattr(e, 'stderr', None)
-                    if stderr is not None and isinstance(stderr, bytes):
-                        info += f'\nSTDERR_FULL:\n{stderr.decode("utf-8")}'
+                    try:
+                        ret = f(pc, **pc.args)  # Execute process
+                    except Exception as e:  # Catch all exceptions, so pylint: disable=broad-exception-caught
+                        _, _, tb = sys.exc_info()
+                        info = str(e) + '\n' + ''.join(traceback.format_tb(tb))
 
-                    log_file.write(info)
-                    error = Proc.ERROR_EXCEPTION
+                        # Exceptions from 'sh' sometimes have a separate stderr field
+                        stderr = getattr(e, 'stderr', None)
+                        if stderr is not None and isinstance(stderr, bytes):
+                            info += f'\nSTDERR_FULL:\n{stderr.decode("utf-8")}'
 
-            sys.stdout = sys.__stdout__
-            sys.stderr = sys.__stderr__
+                        log_file.write(info)
+                        error = Proc.ERROR_EXCEPTION
+                finally:
+                    # Restore OS fds and Python streams before closing log_file
+                    os.dup2(saved_stdout_fd, 1)
+                    os.dup2(saved_stderr_fd, 2)
+                    os.close(saved_stdout_fd)
+                    os.close(saved_stderr_fd)
+                    sys.stdout = sys.__stdout__
+                    sys.stderr = sys.__stderr__
 
             msg = {'req': 'proc-complete', 'value': ret, 'log_filename': log_filename, 'error': error}
 
