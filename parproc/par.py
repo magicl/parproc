@@ -105,6 +105,14 @@ class ProcManager:
         if p.name in self.procs:
             raise UserError(f'Proc "{p.name}" already created')
 
+        # Validate that proc name doesn't contain proto pattern placeholders
+        param_pattern = r'\[([^\]]+)\]'
+        if re.search(param_pattern, p.name):
+            raise UserError(
+                f'Proc name "{p.name}" contains proto pattern placeholders. '
+                f'Proc names must be fully resolved (no [param] placeholders).'
+            )
+
         self.procs[p.name] = p
 
         if p.now or p.name in self.missing_deps:
@@ -391,7 +399,14 @@ class ProcManager:
                     resolved_dep_name = self.create_proc(dep_name_or_pattern)
                 resolved_deps.append(resolved_dep_name)
             else:
-                # No proto match - use as-is (might be a future proc or will error later)
+                # No proto match - validate that it's not a proto pattern
+                param_pattern = r'\[([^\]]+)\]'
+                if re.search(param_pattern, dep_name_or_pattern):
+                    raise UserError(
+                        f'Dependency "{dep}" resolved to proto pattern "{dep_name_or_pattern}" but no matching proto was found. '
+                        f'Dependencies must be either existing proc names or filled-out names that match a proto pattern.'
+                    )
+                # Use as-is (might be a future proc or will error later)
                 resolved_deps.append(dep_name_or_pattern)
 
         return resolved_deps
@@ -496,6 +511,14 @@ class ProcManager:
             if generated_name is None:
                 raise UserError(f'Failed to generate name for proto "{proto_name}"')
             proc_name = generated_name
+
+        # Validate that proc_name doesn't contain proto pattern placeholders
+        param_pattern = r'\[([^\]]+)\]'
+        if re.search(param_pattern, proc_name):
+            raise UserError(
+                f'Proc name "{proc_name}" contains proto pattern placeholders. '
+                f'Proc names must be fully resolved (no [param] placeholders).'
+            )
 
         # If proc_name already exists after substitution, return existing proc
         if proc_name in self.procs:
