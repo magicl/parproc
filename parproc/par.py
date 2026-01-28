@@ -53,6 +53,7 @@ class ProcManager:
         # Options are set in set_options. Defaults:
         self.parallel = 100
         self.dynamic = sys.stdout.isatty()
+        self.allow_missing_deps = True
 
     def clear(self):
         logger.debug('----------------CLEAR----------------------')
@@ -68,15 +69,19 @@ class ProcManager:
             'params': {},
         }
         self.missing_deps: dict[str, bool] = {}
+        self.allow_missing_deps = True
 
-    def set_options(self, parallel: int | None = None, dynamic: bool | None = None) -> None:
+    def set_options(self, parallel: int | None = None, dynamic: bool | None = None, allow_missing_deps: bool | None = None) -> None:
         """
         Parallel: Number of parallel running processes
+        allow_missing_deps: If False, raise error when missing dependency is detected (default: False)
         """
         if parallel is not None:
             self.parallel = parallel
         if dynamic is not None:
             self.term.dynamic = dynamic
+        if allow_missing_deps is not None:
+            self.allow_missing_deps = allow_missing_deps
 
     def set_params(self, **params: Any) -> None:
         for k, v in params.items():
@@ -533,6 +538,11 @@ class ProcManager:
 
             else:
                 # Dependency not yet known
+                if not self.allow_missing_deps:
+                    raise UserError(
+                        f'Proc "{proc.name}" depends on "{d}" which does not exist. '
+                        f'Set allow_missing_deps=True to allow missing dependencies.'
+                    )
                 self.missing_deps[d] = True
 
         return new_deps
@@ -570,6 +580,11 @@ class ProcManager:
 
         for d in proc.deps:
             if d not in self.procs:
+                if not self.allow_missing_deps:
+                    raise UserError(
+                        f'Proc "{proc.name}" depends on "{d}" which does not exist. '
+                        f'Set allow_missing_deps=True to allow missing dependencies.'
+                    )
                 logger.debug(f'Proc "{proc.name}" not started due to unknown dependency "{d}"')
                 return False
 
