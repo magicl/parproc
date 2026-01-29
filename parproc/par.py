@@ -9,11 +9,13 @@ import sys
 import tempfile
 import time
 import traceback
+import uuid
 from collections import OrderedDict
 from collections.abc import Callable
 from typing import Any, Optional, TypeVar, Union
 
 from .state import ProcState
+from . import task_db
 from .term import Term
 
 # pylint: disable=too-many-positional-arguments
@@ -54,6 +56,7 @@ class ProcManager:
         self.parallel = 100
         self.dynamic = sys.stdout.isatty()
         self.allow_missing_deps = True
+        self.task_db_path: str | None = None
 
     def clear(self):
         logger.debug('----------------CLEAR----------------------')
@@ -71,12 +74,19 @@ class ProcManager:
         self.missing_deps: dict[str, bool] = {}
         self.allow_missing_deps = True
 
+    _TASK_DB_PATH_UNSET: Any = object()  # Sentinel for "task_db_path not passed"
+
     def set_options(
-        self, parallel: int | None = None, dynamic: bool | None = None, allow_missing_deps: bool | None = None
+        self,
+        parallel: int | None = None,
+        dynamic: bool | None = None,
+        allow_missing_deps: bool | None = None,
+        task_db_path: str | None = _TASK_DB_PATH_UNSET,
     ) -> None:
         """
         Parallel: Number of parallel running processes
         allow_missing_deps: If False, raise error when missing dependency is detected (default: False)
+        task_db_path: Path to SQLite DB for task run history (progress estimates). None to disable.
         """
         if parallel is not None:
             self.parallel = parallel
@@ -84,6 +94,9 @@ class ProcManager:
             self.term.dynamic = dynamic
         if allow_missing_deps is not None:
             self.allow_missing_deps = allow_missing_deps
+        if task_db_path is not ProcManager._TASK_DB_PATH_UNSET:
+            self.task_db_path = task_db_path
+            task_db.set_path(task_db_path)
 
     def set_params(self, **params: Any) -> None:
         for k, v in params.items():
@@ -783,6 +796,9 @@ class ProcManager:
         proc.state = ProcState.RUNNING
         proc.start_time = time.time()
 
+        if self.task_db_path is not None:
+            task_db.on_task_start(proc.name, datetime.datetime.now(datetime.timezone.utc), proc.run_id)
+
         # Set locks
         for l in proc.locks:
             self.locks[l] = proc
@@ -838,6 +854,13 @@ class ProcManager:
                         for l in p.locks:
                             del self.locks[l]
 
+                        if self.task_db_path is not None:
+                            status = (
+                                "success"
+                                if p.state == ProcState.SUCCEEDED
+                                else ("timeout" if p.error == Proc.ERROR_TIMEOUT else "failed")
+                            )
+                            task_db.on_task_end(p.run_id, datetime.datetime.now(datetime.timezone.utc), status)
                         self.term.end_proc(p)
 
                     elif msg['req'] == 'get-input':
@@ -897,6 +920,8 @@ class ProcManager:
                 for l in p.locks:
                     del self.locks[l]
 
+                if self.task_db_path is not None:
+                    task_db.on_task_end(p.run_id, datetime.datetime.now(datetime.timezone.utc), "timeout")
                 self.term.end_proc(p)
 
         if found_any:
@@ -905,8 +930,13 @@ class ProcManager:
     # Wait for all procs and locks
     def wait_for_all(self, exception_on_failure: bool = True) -> None:
         logger.debug('WAIT FOR COMPLETION')
+        last_term_refresh = time.time()
         while any(p.state != ProcState.IDLE and not p.is_complete() for name, p in self.procs.items()) or self.locks:
             self._step()
+            # Refresh live progress bar every 1/10 s so the user sees task status updates
+            if time.time() - last_term_refresh >= 0.1:
+                self.term.update(force=True)
+                last_term_refresh = time.time()
 
         # Do final update. Force update
         self.term.update(force=True)
@@ -918,8 +948,13 @@ class ProcManager:
     # Wait for procs or locks
     def wait(self, names: list[str]) -> None:
         logger.debug(f'WAIT FOR {names}')
+        last_term_refresh = time.time()
         while not self.check_complete(names):
             self._step()
+            # Refresh live progress bar every 1/10 s so the user sees task status updates
+            if time.time() - last_term_refresh >= 0.1:
+                self.term.update(force=True)
+                last_term_refresh = time.time()
 
         # Do final update. Force update
         self.term.update(force=True)
@@ -1201,6 +1236,7 @@ class Proc:
 
         # Utils
         self.log_filename = ''
+        self.run_id = str(uuid.uuid4())  # Unique id for this run; used by task DB to match start/end
 
         # Main function
         self.func: Any | None = None

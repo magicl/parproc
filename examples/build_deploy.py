@@ -42,7 +42,7 @@ def main() -> None:
     parser.add_argument('cluster_name', type=str, default='prod')
     args = parser.parse_args()
 
-    pp.set_options(dynamic=args.live)
+    pp.set_options(dynamic=args.live, task_db_path='.output/parproc.db')
     define_procs()
 
     # Run the deploy task, which will automatically create and run all dependencies

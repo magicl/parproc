@@ -60,7 +60,7 @@ def main():
     )
     args = parser.parse_args()
 
-    pp.set_options(dynamic=args.live)
+    pp.set_options(dynamic=args.live, task_db_path='.output/parproc.db')
     define_procs()
 
     try:

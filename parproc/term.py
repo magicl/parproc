@@ -21,6 +21,7 @@ from rich.progress import (
 from rich.syntax import Syntax
 
 from .state import ProcState
+from . import task_db
 
 if TYPE_CHECKING:
     from .par import Proc
@@ -43,6 +44,7 @@ class Displayable:
         self.start_time: float | None = None
         self.task_id: TaskID | None = None  # Rich Progress task ID
         self.execution_time: str = ""  # Execution time string for completed tasks
+        self.expected_duration: float | None = None  # Seconds; set when task DB has history
 
     # Get number of lines to display for item
     def height(self) -> int:
@@ -91,9 +93,14 @@ class Term:
         else:
             self._ensure_progress()
             if self.progress is not None:
-                # Create a task for this process (indeterminate progress)
                 description = self._get_description(p)
-                task_id = self.progress.add_task(description, total=None)  # None = indeterminate
+                expected = task_db.get_expected_duration(p.name) if task_db.get_current() else None
+                if expected is not None and expected > 0:
+                    disp.expected_duration = expected
+                    task_id = self.progress.add_task(description, total=expected)
+                else:
+                    disp.expected_duration = None
+                    task_id = self.progress.add_task(description, total=None)  # indeterminate
                 disp.task_id = task_id
                 # Update the display
                 if self.live is not None:
@@ -255,9 +262,9 @@ class Term:
             name += f" - {proc.more_info}"
         return name
 
-    # force: force update
+    # force: force update (e.g. when caller wants to refresh every 1/10 s)
     def update(self, force: bool = False) -> None:
-        # Only make updates every so often
+        # Refresh task statuses at most every updatePeriod (0.1 s) unless force=True
         if self.dynamic and (force or time.time() - self.last_update > Term.updatePeriod):
             self.last_update = time.time()
 
@@ -266,8 +273,17 @@ class Term:
                 for proc, disp in self.active.items():
                     if disp.task_id is not None and not disp.completed:
                         description = self._get_description(proc)
-                        # Update description but keep progress at 0 (indeterminate)
-                        self.progress.update(disp.task_id, description=description, refresh=True)
+                        if disp.expected_duration is not None and disp.start_time is not None:
+                            elapsed = time.time() - disp.start_time
+                            completed = min(elapsed, disp.expected_duration)
+                            self.progress.update(
+                                disp.task_id,
+                                description=description,
+                                completed=completed,
+                                refresh=True,
+                            )
+                        else:
+                            self.progress.update(disp.task_id, description=description, refresh=True)
 
             if self.live is not None:
                 self.live.update(self._render_display())
