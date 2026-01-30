@@ -25,11 +25,15 @@ F = TypeVar('F', bound=Callable[..., Any])
 
 # Types for dependency specifications
 # A dependency can be:
-# - A string (proc name, proto pattern, or filled-out name like "foo-a-2")
+# - A string (proc name, proto pattern, or filled-out name like "foo-a-2" or "foo::a::2")
 # - A callable (lambda) that returns str or list[str]
 DepSpec = str
 DepSpecOrList = Union[str, list[str]]
 DepInput = Union[str, Callable[..., DepSpecOrList]]
+
+# Default separator between proto name and params (and between params). The actual value is
+# the ProcManager option name_param_separator (set via set_options); this constant is the default.
+NAME_PARAM_SEP = '::'
 
 
 class UserError(Exception):
@@ -57,6 +61,7 @@ class ProcManager:
         self.dynamic = sys.stdout.isatty()
         self.allow_missing_deps = True
         self.task_db_path: str | None = None
+        self.name_param_separator = '::'
 
     def clear(self):
         logger.debug('----------------CLEAR----------------------')
@@ -82,11 +87,14 @@ class ProcManager:
         dynamic: bool | None = None,
         allow_missing_deps: bool | None = None,
         task_db_path: str | None = _TASK_DB_PATH_UNSET,
+        name_param_separator: str | None = None,
     ) -> None:
         """
-        Parallel: Number of parallel running processes
+        parallel: Number of parallel running processes
         allow_missing_deps: If False, raise error when missing dependency is detected (default: False)
         task_db_path: Path to SQLite DB for task run history (progress estimates). None to disable.
+        name_param_separator: Separator between proto name and params (and between params). Default '::'.
+          Param values may not contain this string. Patterns must use this separator between [param] placeholders.
         """
         if parallel is not None:
             self.parallel = parallel
@@ -97,6 +105,8 @@ class ProcManager:
         if task_db_path is not ProcManager._TASK_DB_PATH_UNSET:
             self.task_db_path = task_db_path
             task_db.set_path(task_db_path)
+        if name_param_separator is not None:
+            self.name_param_separator = name_param_separator
 
     def set_params(self, **params: Any) -> None:
         for k, v in params.items():
@@ -155,11 +165,12 @@ class ProcManager:
         - Placeholders like [a] that match any value
         - Literal values that must match exactly
 
-        Examples:
-        - Pattern "B-[a]-[b]" matches "B-something-2" (a="something", b="2")
-        - Pattern "B-1-[b]" matches "B-1-2" (b="2") but NOT "B-something-2"
-        - Pattern "B-[a]-3" matches "B-something-3" but NOT "B-something-2"
-        - Pattern "B-1-2" matches "B-1-2" exactly
+        Examples (with default separator "::"):
+        - Pattern "B::[a]::[b]" matches "B::something::2" (a="something", b="2")
+        - Pattern "B::[a]::[b]" matches "B::my-cluster::2" (a="my-cluster", b="2")
+        - Pattern "B::1::[b]" matches "B::1::2" (b="2") but NOT "B::something::2"
+        - Pattern "B::[a]::3" matches "B::something::3" but NOT "B::something::2"
+        - Pattern "B::1::2" matches "B::1::2" exactly
 
         Args:
             rdep_pattern: Pattern with optional [param] placeholders
@@ -176,8 +187,8 @@ class ProcManager:
             # No placeholders, exact match required
             return rdep_pattern == proc_name
 
-        # Build regex pattern similar to _build_regex_pattern
-        # Split on [param] markers
+        # Build regex using configured separator (same param-boundary logic as Proto._build_regex_pattern)
+        sep = self.name_param_separator
         parts = re.split(r'(\[[^\]]+\])', rdep_pattern)
 
         pattern_parts = []
@@ -187,15 +198,12 @@ class ProcManager:
             if not part:
                 continue
             if part.startswith('[') and part.endswith(']'):
-                # This is a parameter marker - match any non-empty sequence
-                # Check if there's any literal text after this parameter
-                has_literal_after = any(not p.startswith('[') and not p.endswith(']') and p for p in parts[i + 1 :])
-                if param_index == len(params) - 1 and not has_literal_after:
-                    # Last parameter and no literals after: match everything to end
+                if param_index == len(params) - 1:
+                    # Last parameter: match everything to end
                     pattern_parts.append('.*')
                 else:
-                    # Not last, or has literals after: match non-empty sequence (greedy, constrained by next literal)
-                    pattern_parts.append('[^-]+')
+                    # Match non-empty sequence that does not contain the separator
+                    pattern_parts.append(f'(?:(?!{re.escape(sep)}).)+')
                 param_index += 1
             else:
                 # Literal text, escape it
@@ -352,14 +360,14 @@ class ProcManager:
         Unified function that processes pattern, filters args, casts types, and optionally generates name.
 
         This combines:
-        - Extracting parameter names from pattern (e.g., "proto-[x]-[y]" -> {"x", "y"})
+        - Extracting parameter names from pattern (e.g., "proto::[x]::[y]" -> {"x", "y"})
         - Filtering to only include parameters that match the pattern's field names
         - Validating that all required parameters are present
         - Casting args to appropriate types based on function signature (if func provided)
         - Optionally generating the final name from pattern and args
 
         Args:
-            pattern: Name pattern with [field] placeholders (e.g., "proto-[x]-[y]")
+            pattern: Name pattern with [field] placeholders (e.g., "proto::[x]::[y]"). Separator is configurable via set_options(name_param_separator=...), default "::".
             all_args: All available arguments
             func: Optional function to use for type casting based on signature
             generate_name: If True, generate and return the final name
@@ -584,7 +592,7 @@ class ProcManager:
         Find a proto that matches the given name (either exact match or pattern match).
 
         Args:
-            name: Either exact proto name or filled-out name like "foo-a-2"
+            name: Either exact proto name or filled-out name like "foo::a::2"
 
         Returns:
             Tuple of (proto, extracted_args) if found, None otherwise
@@ -612,8 +620,8 @@ class ProcManager:
         Create a proc from a proto.
 
         The proto_name can be either:
-        - An exact proto name pattern (e.g., "foo-[x]-[y]") - proc_name must be provided
-        - A filled-out name (e.g., "foo-a-2") - automatically matches proto pattern "foo-[x]-[y]"
+        - An exact proto name pattern (e.g., "foo::[x]::[y]") - proc_name must be provided
+        - A filled-out name (e.g., "foo::a::2") - automatically matches proto pattern "foo::[x]::[y]"
           and extracts x='a', y='2', then generates proc_name
 
         Args:
@@ -1057,10 +1065,12 @@ class DepProcContext:
 class Proto:
     """Decorator for process prototypes. These can be parameterized and instantiated again and again.
 
-    Proto names can contain [field] placeholders (e.g., "foo-[x]-[y]") which are replaced with
-    actual values when creating procs. You can create procs using either:
-    - The proto pattern: create_proc('foo-[x]-[y]') - requires proc_name to be provided
-    - A filled-out name: create_proc('foo-a-2') - automatically extracts x='a', y='2' from the name
+    Proto names can contain [field] placeholders (e.g., "foo::[x]::[y]") which are replaced with
+    actual values when creating procs. The separator between placeholders is configurable via
+    set_options(name_param_separator=...) and defaults to "::" (param values may not contain it).
+    You can create procs using either:
+    - The proto pattern: create_proc('foo::[x]::[y]') - requires proc_name to be provided
+    - A filled-out name: create_proc('foo::a::2') - automatically extracts x='a', y='2' from the name
 
     Dependencies can be:
     - Existing proc names (strings)
@@ -1118,7 +1128,7 @@ class Proto:
         self.func = f
 
         # Generate regex pattern for matching filled-out names
-        # Convert pattern like "foo-[x]-[y]" to regex that can match "foo-a-2" and extract x="a", y="2"
+        # Convert pattern like "foo::[x]::[y]" to regex that can match "foo::a::2" and extract x="a", y="2"
         self._build_regex_pattern()
 
         ProcManager.get_inst().add_proto(self)
@@ -1136,25 +1146,36 @@ class Proto:
         params = re.findall(param_pattern, self.name)
 
         if params:
+            sep = ProcManager.get_inst().name_param_separator
             # Build regex by splitting on [param] markers
-            # e.g., "foo-[x]-[y]" -> ["foo-", "[x]", "-", "[y]", ""]
             parts = re.split(r'(\[[^\]]+\])', self.name)
 
             pattern_parts = []
             param_index = 0
 
-            for part in parts:
+            for i, part in enumerate(parts):
                 if not part:
                     continue
                 if part.startswith('[') and part.endswith(']'):
                     # This is a parameter marker
                     param = part[1:-1]  # Remove [ and ]
-                    if param_index == len(params) - 1:
+                    # Find next non-empty literal (must equal configured separator)
+                    next_literal = None
+                    for p in parts[i + 1 :]:
+                        if p and not (p.startswith('[') and p.endswith(']')):
+                            next_literal = p
+                            break
+                    if next_literal is not None and next_literal != sep:
+                        raise UserError(
+                            f'Pattern "{self.name}" must use the configured separator "{sep}" between '
+                            f'placeholders; found "{next_literal}"'
+                        )
+                    if next_literal is None:
                         # Last parameter: match everything to end
                         pattern_parts.append(f'(?P<{param}>.*)')
                     else:
-                        # Not last: match non-empty sequence (greedy, will be constrained by next literal)
-                        pattern_parts.append(f'(?P<{param}>[^\\-]+)')
+                        # Match any sequence that does not contain the separator
+                        pattern_parts.append(f'(?P<{param}>(?:(?!{re.escape(sep)}).)+)')
                     param_index += 1
                 else:
                     # Literal text, escape it
@@ -1173,7 +1194,7 @@ class Proto:
         Try to match a filled-out name against this proto's pattern and extract parameters.
 
         Args:
-            name: Filled-out name like "foo-a-2" for pattern "foo-[x]-[y]"
+            name: Filled-out name like "foo::a::2" for pattern "foo::[x]::[y]"
 
         Returns:
             Dict of extracted parameters if match, None otherwise
