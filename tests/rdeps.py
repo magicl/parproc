@@ -236,6 +236,46 @@ class RdepTest(TestCase):
         self.assertEqual(results['next.build::stage'], 'next_build_stage')
         self.assertEqual(results['k8s.build-image::stage::frontend'], 'k8s_stage_frontend')
 
+    def test_rdep_injected_when_proc_reached_only_as_dependency(self):
+        """Rdeps must be resolved when a proc is set WANTED via sched_deps, not only via start_proc.
+
+        When we start k8s.build-images::stage (parent), its dep k8s.build-image::stage::frontend
+        is only reached via sched_deps; start_proc is never called for it. So rdeps for
+        k8s.build-image::stage::frontend must be resolved when it is set WANTED in sched_deps,
+        and next.build::stage must be created and run before the frontend build.
+        """
+
+        pp.wait_clear()
+
+        @pp.Proto(name='next.build::[target]', rdeps=['k8s.build-image::[target]::frontend'])
+        def next_build(context: pp.ProcContext, target: str) -> str:
+            return f'next_build_{target}'
+
+        @pp.Proto(name='k8s.build-image::[target]::[image]')
+        def k8s_build_image(context: pp.ProcContext, target: str, image: str) -> str:
+            return f'k8s_{target}_{image}'
+
+        @pp.Proto(
+            name='k8s.build-images::[target]',
+            deps=['k8s.build-image::[target]::frontend', 'k8s.build-image::[target]::backend'],
+        )
+        def k8s_build_images(context: pp.ProcContext, target: str) -> str:
+            return f'build_images_{target}'
+
+        # Start parent only - frontend is reached as dependency, not via start_proc
+        proc_name = pp.create('k8s.build-images::stage')
+        pp.start(proc_name)
+        pp.wait(proc_name)
+
+        results = pp.results()
+        self.assertIn('next.build::stage', results)
+        self.assertIn('k8s.build-image::stage::frontend', results)
+        self.assertIn('k8s.build-image::stage::backend', results)
+        self.assertIn('k8s.build-images::stage', results)
+        self.assertEqual(results['next.build::stage'], 'next_build_stage')
+        self.assertEqual(results['k8s.build-image::stage::frontend'], 'k8s_stage_frontend')
+        self.assertEqual(results['k8s.build-images::stage'], 'build_images_stage')
+
 
 class RdepExtractFromPatternTest(TestCase):
     """Unit tests for _extract_from_rdep_pattern (param extraction when rdep pattern matches)."""

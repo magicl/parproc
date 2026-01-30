@@ -347,6 +347,24 @@ class ProcManager:
 
         return matching_rdeps
 
+    def _inject_rdeps(self, name: str) -> None:
+        """Resolve rdeps for proc name and inject them as dependencies. Run when proc becomes WANTED."""
+        p = self.procs[name]
+        matching_rdeps = self._resolve_rdeps(name)
+        for rdep_proc_name in matching_rdeps:
+            if rdep_proc_name not in p.deps:
+                logger.debug(f'Injecting rdep "{rdep_proc_name}" as dependency of "{p.name}"')
+                p.deps.append(rdep_proc_name)
+        # Check if any dependencies have a higher wave than current proc - this could cause deadlock
+        for d in p.deps:
+            if d in self.procs:
+                dep_proc = self.procs[d]
+                if dep_proc.wave > p.wave:
+                    raise UserError(
+                        f'Proc "{p.name}" (wave {p.wave}) cannot depend on proc "{dep_proc.name}" (wave {dep_proc.wave}). '
+                        f'Dependencies must have equal or lower wave number to avoid deadlock.'
+                    )
+
     # Schedules a proc for execution
     def start_proc(self, name: str) -> None:
         p = self.procs[name]
@@ -355,23 +373,7 @@ class ProcManager:
             logger.debug(f'SCHED: "{p.name}"')
             p.state = ProcState.WANTED
 
-            # Resolve rdeps - find any protos/procs that have rdeps matching this proc
-            matching_rdeps = self._resolve_rdeps(name)
-            # Inject matching rdeps as dependencies
-            for rdep_proc_name in matching_rdeps:
-                if rdep_proc_name not in p.deps:
-                    logger.debug(f'Injecting rdep "{rdep_proc_name}" as dependency of "{p.name}"')
-                    p.deps.append(rdep_proc_name)
-
-            # Check if any dependencies have a higher wave than current proc - this could cause deadlock
-            for d in p.deps:
-                if d in self.procs:
-                    dep_proc = self.procs[d]
-                    if dep_proc.wave > p.wave:
-                        raise UserError(
-                            f'Proc "{p.name}" (wave {p.wave}) cannot depend on proc "{dep_proc.name}" (wave {dep_proc.wave}). '
-                            f'Dependencies must have equal or lower wave number to avoid deadlock.'
-                        )
+            self._inject_rdeps(name)
 
             # Set dependencies as wanted or missing
             if not self.sched_deps(p):  # If no unresolved or unfinished dependencies
@@ -775,6 +777,8 @@ class ProcManager:
         for d in proc.deps:
             if d in self.procs:
                 if self.procs[d].state == ProcState.IDLE:
+                    # Resolve rdeps for this proc so it runs before procs that depend on it
+                    self._inject_rdeps(d)
                     self.procs[d].state = ProcState.WANTED
                     new_deps = True
 
