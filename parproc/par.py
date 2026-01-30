@@ -14,7 +14,7 @@ from collections import OrderedDict
 from collections.abc import Callable
 from typing import Any, Optional, TypeVar, Union
 
-from .state import ProcState
+from .state import FAILED_STATES, ProcState, SUCCEEDED_STATES
 from . import task_db
 from .term import Term
 
@@ -763,11 +763,15 @@ class ProcManager:
                         f'Set allow_missing_deps=True to allow missing dependencies.'
                     )
                 logger.debug(f'Proc "{proc.name}" not started due to unknown dependency "{d}"')
+                proc.state = ProcState.FAILED_DEP
+                proc.error = Proc.ERROR_DEP_FAILED
+                proc.more_info = f'dependency "{d}" missing'
+                self.term.completed_proc(proc)
                 return False
 
             if self.procs[d].is_failed():
                 logger.debug(f'Proc "{proc.name}" canceled due to failed dependency "{d}"')
-                proc.state = ProcState.FAILED
+                proc.state = ProcState.FAILED_DEP
                 proc.error = Proc.ERROR_DEP_FAILED
                 proc.more_info = f'canceled due to failure of "{self.procs[d].name}"'
                 self.term.completed_proc(proc)
@@ -847,7 +851,11 @@ class ProcManager:
                         p.process = None
                         p.output = msg['value']
                         p.error = msg['error']
-                        p.state = ProcState.SUCCEEDED if p.error == Proc.ERROR_NONE else ProcState.FAILED
+                        p.state = (
+                            ProcState.SUCCEEDED
+                            if p.error == Proc.ERROR_NONE
+                            else ProcState.FAILED
+                        )
 
                         found_any = True
                         p.log_filename = os.path.join(str(self.context['logdir']), name + '.log')
@@ -865,7 +873,7 @@ class ProcManager:
                         if self.task_db_path is not None:
                             status = (
                                 "success"
-                                if p.state == ProcState.SUCCEEDED
+                                if p.state in SUCCEEDED_STATES
                                 else ("timeout" if p.error == Proc.ERROR_TIMEOUT else "failed")
                             )
                             task_db.on_task_end(p.run_id, datetime.datetime.now(datetime.timezone.utc), status)
@@ -978,7 +986,11 @@ class ProcManager:
         )
 
     def check_failure(self, names: list[str]) -> bool:
-        return any(self.procs[name].state == ProcState.FAILED for name in names if name in self.procs)
+        return any(
+            self.procs[name].state in FAILED_STATES
+            for name in names
+            if name in self.procs
+        )
 
     # Move things forward
     def _step(self) -> None:
@@ -1281,10 +1293,10 @@ class Proc:
         return self.state == ProcState.RUNNING
 
     def is_complete(self) -> bool:
-        return self.state in {ProcState.SUCCEEDED, ProcState.FAILED}
+        return self.state in SUCCEEDED_STATES or self.state in FAILED_STATES
 
     def is_failed(self) -> bool:
-        return self.state == ProcState.FAILED
+        return self.state in FAILED_STATES
 
     # Called immediately after initialization
     def __call__(self, f: F) -> F:

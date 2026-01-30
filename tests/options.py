@@ -36,7 +36,7 @@ class OptionsTest(TestCase):
         self.assertIn('Set allow_missing_deps=True', str(cm.exception))
 
     def test_allow_missing_deps_true_allows_missing(self):
-        """Test that when allow_missing_deps=True, missing dependencies are allowed"""
+        """Test that when allow_missing_deps=True, proc with missing dep is marked FAILED_DEP"""
         pp.wait_clear()
         pp.ProcManager.get_inst().set_options(allow_missing_deps=True)
 
@@ -48,8 +48,8 @@ class OptionsTest(TestCase):
         def proc_b(context):
             return 'result_b'
 
-        # Should not raise an error - proc_b should be created and in WANTED state
+        # proc_b should be created and marked FAILED_DEP (dependency missing)
         procs = pp.get_procs()
         self.assertIn('proc_a', procs)
         self.assertIn('proc_b', procs)
-        self.assertEqual(procs['proc_b'].state.name, 'WANTED')
+        self.assertEqual(procs['proc_b'].state.name, 'FAILED_DEP')

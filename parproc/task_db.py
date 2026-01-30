@@ -42,7 +42,8 @@ def on_task_start(task_name: str, started_at: datetime, run_id: str) -> None:
 
 
 def on_task_end(run_id: str, ended_at: datetime, status: str) -> None:
-    """Record that a task has ended with the given status. run_id must match the one passed to on_task_start. No-op if no DB is set."""
+    """Record that a task has ended with the given status. run_id must match the one passed to on_task_start. No-op if no DB is set.
+    status distinguishes failure types: 'success', 'failed', 'timeout' (and 'dep_failed' if ever recorded)."""
     if _current is None:
         return
     _current.record_end(run_id, ended_at, status)
@@ -139,7 +140,7 @@ class TaskDB:
             return None
 
         if success_only:
-            rows = [r for r in rows if r[2] == "success"]
+            rows = [r for r in rows if r[2] == "success"]  # "dep_failed" never counted
         if not rows:
             return None
 

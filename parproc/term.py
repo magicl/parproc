@@ -20,7 +20,7 @@ from rich.progress import (
 )
 from rich.syntax import Syntax
 
-from .state import ProcState
+from .state import FAILED_STATES, ProcState, SUCCEEDED_STATES
 from . import task_db
 
 if TYPE_CHECKING:
@@ -117,7 +117,7 @@ class Term:
         if disp.proc.log_filename != '':
             with open(disp.proc.log_filename, encoding='utf-8') as f:
                 log_text = f.read()
-                task_failed = disp.proc.state == ProcState.FAILED
+                task_failed = disp.proc.state in FAILED_STATES
                 disp.chunks = Term.extract_error_log(log_text, task_failed)
 
         if not self.dynamic:
@@ -335,8 +335,10 @@ class Term:
         # Render completed tasks at the top
         for disp in inactive_to_render:
             # Status with checkmark, task name, and execution time
-            if disp.proc.state == ProcState.SUCCEEDED:
+            if disp.proc.state in SUCCEEDED_STATES:
                 status = "[bold green]✓[/bold green]"
+            elif disp.proc.state == ProcState.FAILED_DEP:
+                status = "[bold red]🚫[/bold red]"
             else:
                 status = "[bold red]✗[/bold red]"
 
@@ -363,7 +365,7 @@ class Term:
 
                 # Use Python syntax highlighting for error logs (works well for tracebacks)
                 # For other content, try to auto-detect or use text
-                lexer = "python" if disp.proc.state == ProcState.FAILED else "text"
+                lexer = "python" if disp.proc.state in FAILED_STATES else "text"
                 log_content = Syntax(
                     log_content_str,
                     lexer=lexer,
@@ -374,14 +376,16 @@ class Term:
 
                 # Add filename as title if it's an error with a log file
                 panel_title = None
-                if disp.proc.state == ProcState.FAILED and disp.proc.log_filename:
+                if disp.proc.state in FAILED_STATES and disp.proc.log_filename:
                     # Make filename clickable using file:// protocol
                     abs_path = os.path.abspath(disp.proc.log_filename)
                     # Use Rich markup to create clickable link
                     panel_title = f"[link=file://{abs_path}]{disp.proc.log_filename}[/link]"
 
                 log_panel = Panel(
-                    log_content, title=panel_title, border_style="red" if disp.proc.state == ProcState.FAILED else "dim"
+                    log_content,
+                    title=panel_title,
+                    border_style="red" if disp.proc.state in FAILED_STATES else "dim",
                 )
                 display_parts.append(log_panel)
 
@@ -400,15 +404,17 @@ class Term:
 
     def _render_proc_static(self, disp: Displayable) -> None:
         """Render a process in static (non-dynamic) mode."""
-        if disp.proc.state == ProcState.SUCCEEDED:
+        if disp.proc.state in SUCCEEDED_STATES:
             status = "[bold green]✓[/bold green]"
-        elif disp.proc.state == ProcState.FAILED:
+        elif disp.proc.state == ProcState.FAILED_DEP:
+            status = "[bold red]🚫[/bold red]"
+        elif disp.proc.state in FAILED_STATES:
             status = "[bold red]✗[/bold red]"
         else:
             status = "[yellow]•[/yellow]"
 
         more_info = disp.proc.more_info
-        if disp.proc.state == ProcState.FAILED:
+        if disp.proc.state in FAILED_STATES:
             if more_info == '':
                 more_info = f'logfile: {disp.proc.log_filename}'
 
