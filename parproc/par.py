@@ -78,6 +78,10 @@ class ProcManager:
         }
         self.missing_deps: dict[str, bool] = {}
         self.allow_missing_deps = True
+        self.pending_now: list[str] = []  # Procs with now=True to be started on next _step (list preserves registration order)
+
+        if hasattr(self, 'term') and self.term is not None:
+            self.term.clear()
 
     _TASK_DB_PATH_UNSET: Any = object()  # Sentinel for "task_db_path not passed"
 
@@ -141,8 +145,8 @@ class ProcManager:
         self.procs[p.name] = p
 
         if p.now or p.name in self.missing_deps:
-            # Requested to run by script or dependent
-            self.start_proc(p.name)
+            # Defer start until next _step so that other procs (e.g. deps) can be registered first
+            self.pending_now.append(p.name)
 
     def add_proto(self, p: 'Proto') -> None:
         logger.debug(f'ADD PROTO: "{p.name}"')
@@ -213,6 +217,53 @@ class ProcManager:
         regex = re.compile(regex_str)
         return bool(regex.match(proc_name))
 
+    def _extract_from_rdep_pattern(self, rdep_pattern: str, proc_name: str) -> dict[str, str] | None:
+        """
+        Extract parameter values from proc_name using an rdep pattern.
+
+        When the rdep pattern matches proc_name, returns a dict of param name -> value.
+        E.g. _extract_from_rdep_pattern("k8s.build-image::[target]::frontend", "k8s.build-image::stage::frontend")
+        returns {"target": "stage"}.
+
+        Returns None if the pattern does not match proc_name.
+
+        Note: If the rdep pattern repeats a placeholder name (e.g. B::[x]::[x]), only one value per
+        name is returned (the last match), as per Python regex groupdict().
+        """
+        param_pattern = r'\[([^\]]+)\]'
+        params = re.findall(param_pattern, rdep_pattern)
+
+        if not params:
+            if rdep_pattern == proc_name:
+                return {}
+            return None
+
+        sep = self.name_param_separator
+        parts = re.split(r'(\[[^\]]+\])', rdep_pattern)
+
+        pattern_parts = []
+        param_index = 0
+
+        for i, part in enumerate(parts):
+            if not part:
+                continue
+            if part.startswith('[') and part.endswith(']'):
+                param_name = params[param_index]
+                if param_index == len(params) - 1:
+                    pattern_parts.append(f'(?P<{re.escape(param_name)}>.*)')
+                else:
+                    pattern_parts.append(f'(?P<{re.escape(param_name)}>(?:(?!{re.escape(sep)}).)+)')
+                param_index += 1
+            else:
+                pattern_parts.append(re.escape(part))
+
+        regex_str = '^' + ''.join(pattern_parts) + '$'
+        regex = re.compile(regex_str)
+        match = regex.match(proc_name)
+        if not match:
+            return None
+        return match.groupdict()
+
     def _resolve_rdeps(self, proc_name: str) -> list[str]:
         """
         Find all protos and procs that have rdeps matching the given proc name.
@@ -252,17 +303,36 @@ class ProcManager:
                                     f'Failed to create proc from proto "{proto.name}" with rdep "{rdep}" matching "{proc_name}"'
                                 )
                     else:
-                        # proc_name doesn't match proto pattern - try to create proc from proto name
-                        # If proto name is a pattern, we can't create without args, so skip
-                        param_pattern = r'\[([^\]]+)\]'
-                        if not re.search(param_pattern, proto.name):
+                        # proc_name doesn't match proto pattern (rdep pattern differs from proto pattern).
+                        # Extract args from proc_name using the rdep pattern; param names in the proto
+                        # pattern must appear in the rdep pattern (and thus in rdep_args) for injection.
+                        # E.g. rdep "k8s.build-image::[target]::frontend" matching "k8s.build-image::stage::frontend"
+                        # gives target=stage; then create proto "next.build::[target]" as "next.build::stage".
+                        rdep_args = self._extract_from_rdep_pattern(rdep, proc_name)
+                        if rdep_args is not None:
+                            param_pattern = r'\[([^\]]+)\]'
+                            proto_params = re.findall(param_pattern, proto.name)
+                            if proto_params and all(p in rdep_args for p in proto_params):
+                                generated_name = proto.name
+                                for param in proto_params:
+                                    generated_name = generated_name.replace(
+                                        f'[{param}]', str(rdep_args[param])
+                                    )
+                                if generated_name not in self.procs:
+                                    try:
+                                        created_name = self.create_proc(generated_name)
+                                        matching_rdeps.append(created_name)
+                                    except UserError:
+                                        logger.debug(
+                                            f'Failed to create proc from proto "{proto.name}" with rdep "{rdep}" matching "{proc_name}"'
+                                        )
+                        elif not re.search(r'\[([^\]]+)\]', proto.name):
                             # Proto name is exact (no pattern) - create proc from it
                             if proto.name not in self.procs:
                                 try:
                                     created_name = self.create_proc(proto.name)
                                     matching_rdeps.append(created_name)
                                 except UserError:
-                                    # Failed to create proc, skip it
                                     logger.debug(
                                         f'Failed to create proc from proto "{proto.name}" with rdep "{rdep}" matching "{proc_name}"'
                                     )
@@ -947,7 +1017,11 @@ class ProcManager:
     def wait_for_all(self, exception_on_failure: bool = True) -> None:
         logger.debug('WAIT FOR COMPLETION')
         last_term_refresh = time.time()
-        while any(p.state != ProcState.IDLE and not p.is_complete() for name, p in self.procs.items()) or self.locks:
+        while (
+            self.pending_now
+            or any(p.state != ProcState.IDLE and not p.is_complete() for name, p in self.procs.items())
+            or self.locks
+        ):
             self._step()
             # Refresh live progress bar every 1/10 s so the user sees task status updates
             if time.time() - last_term_refresh >= 0.1:
@@ -994,6 +1068,14 @@ class ProcManager:
 
     # Move things forward
     def _step(self) -> None:
+        # Start any procs that were added with now=True (deferred so deps can be registered first)
+        # Process in registration order (list) so e.g. p0 is scheduled before p1 before p2.
+        # Clear pending_now after processing: each name only needs start_proc once; re-adding
+        # names whose state is no longer IDLE would keep them in pending_now forever and stall the loop.
+        for name in self.pending_now:
+            if name in self.procs and self.procs[name].state == ProcState.IDLE:
+                self.start_proc(name)
+        self.pending_now = []
         # Move things forward
         self.collect()
         # Try to execute any WANTED procs

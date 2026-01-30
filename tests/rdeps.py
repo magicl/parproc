@@ -207,6 +207,127 @@ class RdepTest(TestCase):
         self.assertIn('B::test::2', results)
         self.assertEqual(results['B::test::2'], 'B_test_2_A_test')
 
+    def test_rdep_cross_pattern_injection(self):
+        """Test that a proto with rdep pattern different from its own pattern gets injected.
+
+        When proto next.build::[target] has rdeps=['k8s.build-image::[target]::frontend'],
+        starting k8s.build-image::stage::frontend should inject next.build::stage as a dependency
+        (extract target=stage from the started proc name using the rdep pattern).
+        """
+
+        pp.wait_clear()
+
+        @pp.Proto(name='next.build::[target]', rdeps=['k8s.build-image::[target]::frontend'])
+        def next_build(context: pp.ProcContext, target: str) -> str:
+            return f'next_build_{target}'
+
+        @pp.Proto(name='k8s.build-image::[target]::[image]')
+        def k8s_build_image(context: pp.ProcContext, target: str, image: str) -> str:
+            return f'k8s_{target}_{image}'
+
+        # Start k8s.build-image::stage::frontend - next.build::stage should be injected as dependency
+        proc_name = pp.create('k8s.build-image::stage::frontend')
+        pp.start(proc_name)
+        pp.wait(proc_name)
+
+        results = pp.results()
+        self.assertIn('next.build::stage', results)
+        self.assertIn('k8s.build-image::stage::frontend', results)
+        self.assertEqual(results['next.build::stage'], 'next_build_stage')
+        self.assertEqual(results['k8s.build-image::stage::frontend'], 'k8s_stage_frontend')
+
+
+class RdepExtractFromPatternTest(TestCase):
+    """Unit tests for _extract_from_rdep_pattern (param extraction when rdep pattern matches)."""
+
+    def setUp(self):
+        logging.basicConfig(level=logging.DEBUG)
+        pp.ProcManager.get_inst().set_options(dynamic=False)
+        self.manager = pp.ProcManager.get_inst()
+
+    def test_extract_exact_pattern(self):
+        """No placeholders: exact match returns {}, no match returns None."""
+        self.assertEqual(self.manager._extract_from_rdep_pattern('B::1::2', 'B::1::2'), {})
+        self.assertIsNone(self.manager._extract_from_rdep_pattern('B::1::2', 'B::1::3'))
+        self.assertIsNone(self.manager._extract_from_rdep_pattern('B::1::2', 'B::2::2'))
+
+    def test_extract_single_placeholder(self):
+        """Pattern B::[a]: returns param value or None."""
+        self.assertEqual(self.manager._extract_from_rdep_pattern('B::[a]', 'B::test'), {'a': 'test'})
+        self.assertEqual(self.manager._extract_from_rdep_pattern('B::[a]', 'B::123'), {'a': '123'})
+        self.assertIsNone(self.manager._extract_from_rdep_pattern('B::[a]', 'C::test'))
+
+    def test_extract_two_placeholders(self):
+        """Pattern B::[a]::[b]: returns both param values."""
+        self.assertEqual(
+            self.manager._extract_from_rdep_pattern('B::[a]::[b]', 'B::test::2'),
+            {'a': 'test', 'b': '2'},
+        )
+        self.assertEqual(
+            self.manager._extract_from_rdep_pattern('B::[a]::[b]', 'B::foo::42'),
+            {'a': 'foo', 'b': '42'},
+        )
+        self.assertIsNone(self.manager._extract_from_rdep_pattern('B::[a]::[b]', 'B::test'))
+        self.assertIsNone(self.manager._extract_from_rdep_pattern('B::[a]::[b]', 'C::test::2'))
+
+    def test_extract_literal_first(self):
+        """Pattern B::1::[b]: literal first, extract second segment."""
+        self.assertEqual(self.manager._extract_from_rdep_pattern('B::1::[b]', 'B::1::2'), {'b': '2'})
+        self.assertEqual(self.manager._extract_from_rdep_pattern('B::1::[b]', 'B::1::42'), {'b': '42'})
+        self.assertIsNone(self.manager._extract_from_rdep_pattern('B::1::[b]', 'B::2::2'))
+        self.assertIsNone(self.manager._extract_from_rdep_pattern('B::1::[b]', 'B::1'))
+
+    def test_extract_literal_last(self):
+        """Pattern B::[a]::2: literal last, extract first segment."""
+        self.assertEqual(self.manager._extract_from_rdep_pattern('B::[a]::2', 'B::test::2'), {'a': 'test'})
+        self.assertEqual(self.manager._extract_from_rdep_pattern('B::[a]::2', 'B::foo::2'), {'a': 'foo'})
+        self.assertEqual(self.manager._extract_from_rdep_pattern('B::[a]::2', 'B::1::2'), {'a': '1'})
+        self.assertIsNone(self.manager._extract_from_rdep_pattern('B::[a]::2', 'B::test::3'))
+        self.assertIsNone(self.manager._extract_from_rdep_pattern('B::[a]::2', 'B::test'))
+
+    def test_extract_literal_middle(self):
+        """Pattern B::[a]::1::[b]: literal in middle."""
+        self.assertEqual(
+            self.manager._extract_from_rdep_pattern('B::[a]::1::[b]', 'B::test::1::2'),
+            {'a': 'test', 'b': '2'},
+        )
+        self.assertEqual(
+            self.manager._extract_from_rdep_pattern('B::[a]::1::[b]', 'B::foo::1::42'),
+            {'a': 'foo', 'b': '42'},
+        )
+        self.assertIsNone(self.manager._extract_from_rdep_pattern('B::[a]::1::[b]', 'B::test::2::2'))
+        self.assertIsNone(self.manager._extract_from_rdep_pattern('B::[a]::1::[b]', 'B::test::1'))
+
+    def test_extract_real_world_cross_pattern(self):
+        """Real-world case: k8s.build-image::[target]::frontend vs k8s.build-image::stage::frontend."""
+        self.assertEqual(
+            self.manager._extract_from_rdep_pattern(
+                'k8s.build-image::[target]::frontend',
+                'k8s.build-image::stage::frontend',
+            ),
+            {'target': 'stage'},
+        )
+
+    def test_extract_params_may_contain_hyphen(self):
+        """Param values can contain hyphens (e.g. my-cluster, us-east-1)."""
+        self.assertEqual(
+            self.manager._extract_from_rdep_pattern('B::[a]::[b]', 'B::my-cluster::2'),
+            {'a': 'my-cluster', 'b': '2'},
+        )
+        self.assertEqual(
+            self.manager._extract_from_rdep_pattern('B::[a]::[b]', 'B::my-cluster::us-east-1'),
+            {'a': 'my-cluster', 'b': 'us-east-1'},
+        )
+
+    def test_extract_complex_pattern(self):
+        """Pattern A::[x]::B::[y]::C with multiple placeholders and literals."""
+        self.assertEqual(
+            self.manager._extract_from_rdep_pattern('A::[x]::B::[y]::C', 'A::test::B::foo::C'),
+            {'x': 'test', 'y': 'foo'},
+        )
+        self.assertIsNone(self.manager._extract_from_rdep_pattern('A::[x]::B::[y]::C', 'A::test::B::foo::D'))
+        self.assertIsNone(self.manager._extract_from_rdep_pattern('A::[x]::B::[y]::C', 'A::test::C::foo::B'))
+
 
 class RdepPatternMatchingTest(TestCase):
     """Detailed unit tests for rdep pattern matching"""

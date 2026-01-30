@@ -68,6 +68,16 @@ class Term:
         self.progress: Progress | None = None
         self.live: Live | None = None
 
+    def clear(self) -> None:
+        """Reset display state (e.g. when ProcManager.clear() starts a new session)."""
+        if self.live is not None:
+            self.live.stop()
+            self.live = None
+        self.progress = None
+        self.active = OrderedDict()
+        self.inactive = []
+        self.rendered_inactive = set()
+
     def _ensure_progress(self) -> None:
         """Initialize Progress and Live display if needed."""
         if self.progress is None and self.dynamic:
