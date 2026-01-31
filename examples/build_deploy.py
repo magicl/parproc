@@ -21,16 +21,16 @@ def define_procs() -> None:
     def upload(context: pp.ProcContext) -> None:
         time.sleep(1)
 
-    @pp.Proto(name='k8s.build::[clusterName]')
-    def build(context: pp.ProcContext, clusterName: str) -> None:
+    @pp.Proto(name='k8s.build::[cluster_name]')
+    def build(context: pp.ProcContext, cluster_name: str) -> None:
         time.sleep(1)
 
-    @pp.Proto(name='k8s.push::[clusterName]', deps=['@k8s.build::[clusterName]'])
-    def push(context: pp.ProcContext, clusterName: str) -> None:
+    @pp.Proto(name='k8s.push::[cluster_name]', deps=['@k8s.build::[cluster_name]'])
+    def push(context: pp.ProcContext, cluster_name: str) -> None:
         time.sleep(1)
 
-    @pp.Proto(name='k8s.deploy::[clusterName]', deps=['@k8s.push::[clusterName]', '@cdn.upload'])
-    def deploy(context: pp.ProcContext, clusterName: str) -> None:
+    @pp.Proto(name='k8s.deploy::[cluster_name]', deps=['@k8s.push::[cluster_name]', '@cdn.upload'])
+    def deploy(context: pp.ProcContext, cluster_name: str) -> None:
         time.sleep(1)
 
 
@@ -46,7 +46,7 @@ def main() -> None:
     define_procs()
 
     # Run the deploy task, which will automatically create and run all dependencies
-    pp.run('k8s.deploy::[clusterName]', clusterName=args.cluster_name)
+    pp.run('k8s.deploy::[cluster_name]', cluster_name=args.cluster_name)
 
     try:
         pp.wait_for_all()

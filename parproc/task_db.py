@@ -8,7 +8,7 @@ to show determinate progress bars when history exists.
 
 import os
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Optional
 
 # Module-level current DB; set by set_path(), used by par.py and term.py
@@ -25,7 +25,7 @@ def set_path(path: str | None) -> None:
     Set the task database path. When path is set, open/create DB and create
     table if missing. When None, clear the current DB (hooks/reads become no-op).
     """
-    global _current
+    global _current  # pylint: disable=global-statement  # Module-level singleton; required
     if path is None:
         if _current is not None:
             _current.close()
@@ -71,7 +71,7 @@ class TaskDB:
 
     def __init__(self, path: str) -> None:
         self._path = path
-        self._conn: Optional[sqlite3.Connection] = None
+        self._conn: sqlite3.Connection | None = None
         self._open()
 
     def _open(self) -> None:
@@ -104,6 +104,8 @@ class TaskDB:
             self._conn = None
 
     def record_start(self, task_name: str, started_at: datetime, run_id: str) -> None:
+        if self._conn is None:
+            return
         started_str = started_at.isoformat()
         self._conn.execute(
             "INSERT INTO runs (run_id, task_name, started_at, ended_at, status) VALUES (?, ?, ?, NULL, NULL)",
@@ -112,6 +114,8 @@ class TaskDB:
         self._conn.commit()
 
     def record_end(self, run_id: str, ended_at: datetime, status: str) -> None:
+        if self._conn is None:
+            return
         ended_str = ended_at.isoformat()
         self._conn.execute(
             "UPDATE runs SET ended_at = ?, status = ? WHERE run_id = ?",
@@ -126,6 +130,8 @@ class TaskDB:
         decay: float = 0.8,
         success_only: bool = True,
     ) -> float | None:
+        if self._conn is None:
+            return None
         cursor = self._conn.execute(
             """
             SELECT started_at, ended_at, status FROM runs

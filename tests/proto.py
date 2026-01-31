@@ -1,5 +1,7 @@
-# pylint: disable=unused-argument
+# pylint: disable=unused-argument,protected-access
+# (protected-access: tests exercise internal implementation of Proto/ProcManager.)
 import logging
+import os
 import time
 from typing import cast
 from unittest import TestCase
@@ -7,11 +9,12 @@ from unittest import TestCase
 import parproc as pp
 
 
-class ProtoTest(TestCase):
+class ProtoTest(TestCase):  # pylint: disable=too-many-public-methods
 
     def setUp(self):
         logging.basicConfig(level=logging.DEBUG)
-        pp.ProcManager.get_inst().set_options(dynamic=False)
+        mode = os.environ.get('PARPROC_TEST_MODE', 'mp')
+        pp.ProcManager.get_inst().set_options(mode=mode, dynamic=False)
 
     def test_proto_from_base(self):
         """Proto creation from base"""
@@ -95,6 +98,8 @@ class ProtoTest(TestCase):
 
     def test_timeouts(self):
         """Check timeouts within procs and within procs within procs"""
+        if os.environ.get('PARPROC_TEST_MODE') == 'single':
+            self.skipTest('timeout is not enforced in single-process mode')
 
         pp.Proto('sleepy', lambda c: time.sleep(10), timeout=1, now=True)
 
@@ -308,7 +313,9 @@ class ProtoTest(TestCase):
         def dep_proc(context: pp.ProcContext, x: str, y: int) -> str:
             return f'dep_{x}_{y}'
 
-        @pp.Proto(name='main::[value]', deps=['dep::override::999'])  # Filled-out name that matches dep::[x]::[y] pattern
+        @pp.Proto(
+            name='main::[value]', deps=['dep::override::999']
+        )  # Filled-out name that matches dep::[x]::[y] pattern
         def main_proc(context: pp.ProcContext, value: str) -> str:
             dep_result = context.results.get('dep::override::999')
             return f'main_{value}_{dep_result}'
@@ -577,7 +584,9 @@ class ProtoTest(TestCase):
         def foo_proc2(context: pp.ProcContext, a: int, b: int) -> int:
             return a * 10 + b
 
-        @pp.Proto(name='test-partial-a::[a]', deps=['foo::[a]::2'])  # Pattern: a comes from function args, b is fixed to 2
+        @pp.Proto(
+            name='test-partial-a::[a]', deps=['foo::[a]::2']
+        )  # Pattern: a comes from function args, b is fixed to 2
         def test_partial_a(context: pp.ProcContext, a: int) -> int:
             # a=3 should create dependency foo::3::2 automatically
             dep_name = f'foo::{a}::2'
@@ -604,7 +613,9 @@ class ProtoTest(TestCase):
         def foo_proc3(context: pp.ProcContext, a: int, b: int) -> int:
             return a * 10 + b
 
-        @pp.Proto(name='test-partial-b::[b]', deps=['foo::1::[b]'])  # Pattern: a is fixed to 1, b comes from function args
+        @pp.Proto(
+            name='test-partial-b::[b]', deps=['foo::1::[b]']
+        )  # Pattern: a is fixed to 1, b comes from function args
         def test_partial_b(context: pp.ProcContext, b: int) -> int:
             # b=4 should create dependency foo::1::4 automatically
             dep_name = f'foo::1::{b}'
@@ -633,7 +644,10 @@ class ProtoTest(TestCase):
 
         @pp.Proto(
             name='test-mixed::[a]::[b]',
-            deps=['foo::[a]::2', 'foo::1::[b]'],  # a from function args, b fixed to 2  # a fixed to 1, b from function args
+            deps=[
+                'foo::[a]::2',
+                'foo::1::[b]',
+            ],  # a from function args, b fixed to 2  # a fixed to 1, b from function args
         )
         def test_mixed(context: pp.ProcContext, a: int, b: int) -> int:
             # a=5 creates foo::5::2, b=6 creates foo::1::6 automatically
@@ -748,9 +762,9 @@ class ProtoTest(TestCase):
         """Test that "::" separator allows param values to contain "-" """
         pp.wait_clear()
 
-        @pp.Proto(name='k8s.build::[clusterName]')
-        def build(context: pp.ProcContext, clusterName: str) -> str:
-            return f'built_{clusterName}'
+        @pp.Proto(name='k8s.build::[cluster_name]')
+        def build(context: pp.ProcContext, cluster_name: str) -> str:
+            return f'built_{cluster_name}'
 
         # Param "my-cluster" would be ambiguous with "-" separator; with "::" it works
         proc_name = pp.create('k8s.build::my-cluster')
@@ -949,7 +963,7 @@ class ProtoTest(TestCase):
         def b_proc_v2(context: pp.ProcContext, a: str, b: int) -> str:
             return f'B_{a}_{b}'
 
-        setup_name = pp.create('setup::test')
+        pp.create('setup::test')
         proc_name = pp.create('B::test::2')
         pp.start(proc_name)
         pp.wait(proc_name)

@@ -3,7 +3,6 @@ import inspect
 import logging
 import multiprocessing as mp
 import os
-import queue
 import re
 import sys
 import tempfile
@@ -14,8 +13,9 @@ from collections import OrderedDict
 from collections.abc import Callable
 from typing import Any, Optional, TypeVar, Union
 
-from .state import FAILED_STATES, ProcState, SUCCEEDED_STATES
 from . import task_db
+from .runner import MultiProcessRunner, SingleProcessRunner
+from .state import FAILED_STATES, SUCCEEDED_STATES, ProcState
 from .term import Term
 
 # pylint: disable=too-many-positional-arguments
@@ -47,18 +47,22 @@ class ProcessError(Exception):
 logger = logging.getLogger('par')
 
 
-class ProcManager:
+class ProcManager:  # pylint: disable=too-many-public-methods
 
     inst: Optional['ProcManager'] = None  # Singleton instance
 
     def __init__(self):
-
+        self.logger = logger
+        self.pending_now: list[str] = []
         self.clear()
         self.term = Term(dynamic=sys.stdout.isatty())
 
         # Options are set in set_options. Defaults:
         self.parallel = 100
         self.dynamic = sys.stdout.isatty()
+        self.mode = 'mp'
+        self.debug = False
+        self.runner: Any = MultiProcessRunner()
         self.allow_missing_deps = True
         self.task_db_path: str | None = None
         self.name_param_separator = '::'
@@ -78,10 +82,18 @@ class ProcManager:
         }
         self.missing_deps: dict[str, bool] = {}
         self.allow_missing_deps = True
-        self.pending_now: list[str] = []  # Procs with now=True to be started on next _step (list preserves registration order)
+        self.pending_now = []  # Procs with now=True to be started on next _step
 
         if hasattr(self, 'term') and self.term is not None:
             self.term.clear()
+
+        if getattr(self, 'debug', False):
+            self.parallel = 1
+            self.term.dynamic = False
+        if getattr(self, 'mode', 'mp') == 'single':
+            self.runner = SingleProcessRunner()
+        else:
+            self.runner = MultiProcessRunner()
 
     _TASK_DB_PATH_UNSET: Any = object()  # Sentinel for "task_db_path not passed"
 
@@ -89,12 +101,17 @@ class ProcManager:
         self,
         parallel: int | None = None,
         dynamic: bool | None = None,
+        mode: str | None = None,
+        debug: bool | None = None,
         allow_missing_deps: bool | None = None,
         task_db_path: str | None = _TASK_DB_PATH_UNSET,
         name_param_separator: str | None = None,
     ) -> None:
         """
         parallel: Number of parallel running processes
+        dynamic: If True, terminal updates in place; if False, static output.
+        mode: "mp" (default, multiprocessing) or "single" (single process, single thread).
+        debug: If True, sets mode="single", parallel=1, dynamic=False.
         allow_missing_deps: If False, raise error when missing dependency is detected (default: False)
         task_db_path: Path to SQLite DB for task run history (progress estimates). None to disable.
         name_param_separator: Separator between proto name and params (and between params). Default '::'.
@@ -104,6 +121,18 @@ class ProcManager:
             self.parallel = parallel
         if dynamic is not None:
             self.term.dynamic = dynamic
+        if mode is not None:
+            if mode not in ('mp', 'single'):
+                raise UserError(f'mode must be "mp" or "single", got {mode!r}')
+            self.mode = mode
+            self.runner = SingleProcessRunner() if mode == 'single' else MultiProcessRunner()
+        if debug is not None:
+            self.debug = debug
+            if debug:
+                self.mode = 'single'
+                self.parallel = 1
+                self.term.dynamic = False
+                self.runner = SingleProcessRunner()
         if allow_missing_deps is not None:
             self.allow_missing_deps = allow_missing_deps
         if task_db_path is not ProcManager._TASK_DB_PATH_UNSET:
@@ -198,7 +227,7 @@ class ProcManager:
         pattern_parts = []
         param_index = 0
 
-        for i, part in enumerate(parts):
+        for part in parts:
             if not part:
                 continue
             if part.startswith('[') and part.endswith(']'):
@@ -244,7 +273,7 @@ class ProcManager:
         pattern_parts = []
         param_index = 0
 
-        for i, part in enumerate(parts):
+        for part in parts:
             if not part:
                 continue
             if part.startswith('[') and part.endswith(']'):
@@ -315,9 +344,7 @@ class ProcManager:
                             if proto_params and all(p in rdep_args for p in proto_params):
                                 generated_name = proto.name
                                 for param in proto_params:
-                                    generated_name = generated_name.replace(
-                                        f'[{param}]', str(rdep_args[param])
-                                    )
+                                    generated_name = generated_name.replace(f'[{param}]', str(rdep_args[param]))
                                 if generated_name not in self.procs:
                                     try:
                                         created_name = self.create_proc(generated_name)
@@ -804,6 +831,30 @@ class ProcManager:
             if p.state == ProcState.WANTED:
                 self.try_execute_one(p, False)  # Do not go deeper while iterating
 
+    def _try_execute_any_single_wait(self) -> None:
+        """Run one WANTED proc, skipping wave and parallel limits. For single-mode context.wait() re-entry."""
+        for _, p in self.procs.items():
+            if p.state == ProcState.WANTED:
+                self._try_execute_one_skip_limits(p)
+                return
+
+    def _try_execute_one_skip_limits(self, proc: 'Proc') -> bool:
+        """Execute one proc if deps/locks ok, skipping wave and parallel checks (single-mode wait re-entry)."""
+        for l in proc.locks:
+            if l in self.locks:
+                return False
+        for d in proc.deps:
+            if d not in self.procs or not self.procs[d].is_complete():
+                if d in self.procs and self.procs[d].is_failed():
+                    proc.state = ProcState.FAILED_DEP
+                    proc.error = Proc.ERROR_DEP_FAILED
+                    proc.more_info = f'dependency "{self.procs[d].name}" failed'
+                    self.term.completed_proc(proc)
+                return False
+        if proc.state == ProcState.WANTED:
+            self.execute(proc)
+        return True
+
     # Executes proc now if possible. Returns false if not possible
     def try_execute_one(self, proc: 'Proc', collect: bool = True) -> bool:
 
@@ -872,150 +923,12 @@ class ProcManager:
         return False
 
     def execute(self, proc: 'Proc') -> None:
-        # Add context for specific process
-        context = {'args': proc.args, **self.context}
-        logger.info(f'Exec "{proc.name}" with context {context}')
-
-        # Queues for bidirectional communication
-        proc.queue_to_proc = mp.Queue()
-        proc.queue_to_master = mp.Queue()
-        proc.state = ProcState.RUNNING
-        proc.start_time = time.time()
-
-        if self.task_db_path is not None:
-            task_db.on_task_start(proc.name, datetime.datetime.now(datetime.timezone.utc), proc.run_id)
-
-        # Set locks
-        for l in proc.locks:
-            self.locks[l] = proc
-
-        # Kick off process
-        self.term.start_proc(proc)
-        proc.process = mp.Process(
-            target=proc.func,
-            name=f'parproc-child-{proc.name}',
-            args=(proc.queue_to_proc, proc.queue_to_master, context, proc.name),
-        )
-        proc.process.start()
+        self.runner.start_task(self, proc)
 
     # Finds any procs that have completed their execution, and moves them on. Tries to execute other
     # procs if any procs were collected
     def collect(self) -> None:
-        found_any = False
-        for name in list(self.procs):
-            p = self.procs[name]  # Might mutate procs list, so iterate pregenerated list
-
-            if p.is_running():
-                assert p.queue_to_master is not None  # nosec
-                assert p.queue_to_proc is not None  # nosec
-
-                # Try to get output
-                try:
-                    # logger.debug('collect: looking')
-                    msg = p.queue_to_master.get_nowait()
-                except queue.Empty:  # Not done yet
-                    # logger.debug('collect: empty')
-                    pass
-                else:
-                    logger.debug(f'got msg from proc "{name}": {msg}')
-                    # Process sent us data
-                    if msg['req'] == 'proc-complete':
-                        # Process is done
-                        # logger.debug('collect: done')
-                        p.process = None
-                        p.output = msg['value']
-                        p.error = msg['error']
-                        p.state = (
-                            ProcState.SUCCEEDED
-                            if p.error == Proc.ERROR_NONE
-                            else ProcState.FAILED
-                        )
-
-                        found_any = True
-                        p.log_filename = os.path.join(str(self.context['logdir']), name + '.log')
-
-                        logger.info(f'proc "{p.name}" collected: ret = {p.output}')
-
-                        self.context['results'][p.name] = p.output
-
-                        logger.info(f'new context: {self.context}')
-
-                        # Release locks
-                        for l in p.locks:
-                            del self.locks[l]
-
-                        if self.task_db_path is not None:
-                            status = (
-                                "success"
-                                if p.state in SUCCEEDED_STATES
-                                else ("timeout" if p.error == Proc.ERROR_TIMEOUT else "failed")
-                            )
-                            task_db.on_task_end(p.run_id, datetime.datetime.now(datetime.timezone.utc), status)
-                        self.term.end_proc(p)
-
-                    elif msg['req'] == 'get-input':
-                        # Proc is requesting input. Provide it
-                        input_ = self.term.get_input(message=msg['message'], password=msg['password'])
-
-                        msg.update({'resp': input_})
-                        p.queue_to_proc.put(msg)
-
-                    elif msg['req'] == 'create-proc':
-                        proc_name = self.create_proc(msg['proto_name'], msg.get('proc_name'))
-                        msg.update({'proc_name': proc_name})  # In case we created new name
-                        p.queue_to_proc.put(msg)  # Respond with same msg. No new data
-
-                    elif msg['req'] == 'start-procs':
-                        self.start_procs(msg['names'])
-                        p.queue_to_proc.put(msg)  # Respond with same msg. No new data
-
-                    elif msg['req'] == 'check-complete':
-                        msg.update(
-                            {'complete': self.check_complete(msg['names']), 'failure': self.check_failure(msg['names'])}
-                        )
-                        if p.queue_to_proc is not None:
-                            p.queue_to_proc.put(msg)
-
-                    elif msg['req'] == 'get-results':
-                        msg.update({'results': self.context['results']})
-                        if p.queue_to_proc is not None:
-                            p.queue_to_proc.put(msg)
-
-                    else:
-                        raise UserError(f'unknown call: {msg["req"]}')
-
-            # If still running after processing messages, check for timeout
-            if (
-                p.is_running()
-                and p.timeout is not None
-                and p.start_time is not None
-                and (time.time() - p.start_time) > p.timeout
-            ):
-
-                if p.process is not None:
-                    p.process.terminate()
-                p.process = None
-                p.output = None
-                p.error = Proc.ERROR_TIMEOUT
-                p.state = ProcState.FAILED
-                p.log_filename = os.path.join(str(self.context['logdir']), name + '.log')
-
-                logger.info(f'proc "{p.name}" timed out')
-
-                self.context['results'][p.name] = None
-
-                logger.info(f'new context: {self.context}')
-
-                # Release locks
-                for l in p.locks:
-                    del self.locks[l]
-
-                if self.task_db_path is not None:
-                    task_db.on_task_end(p.run_id, datetime.datetime.now(datetime.timezone.utc), "timeout")
-                self.term.end_proc(p)
-
-        if found_any:
-            self.try_execute_any()
+        self.runner.collect(self)
 
     # Wait for all procs and locks
     def wait_for_all(self, exception_on_failure: bool = True) -> None:
@@ -1064,11 +977,7 @@ class ProcManager:
         )
 
     def check_failure(self, names: list[str]) -> bool:
-        return any(
-            self.procs[name].state in FAILED_STATES
-            for name in names
-            if name in self.procs
-        )
+        return any(self.procs[name].state in FAILED_STATES for name in names if name in self.procs)
 
     # Move things forward
     def _step(self) -> None:
@@ -1096,11 +1005,142 @@ class ProcManager:
         self.wait_for_all(exception_on_failure=exception_on_failure)
         self.clear()
 
+    def build_pc(
+        self, proc: 'Proc', context: dict[str, Any], queue_to_proc: Any, queue_to_master: Any
+    ) -> 'ProcContext':
+        """Build ProcContext for a task (used by runners)."""
+        if proc.name is None:
+            raise UserError('Proc has no name')
+        return ProcContext(proc.name, context, queue_to_proc, queue_to_master)
+
+    def run_task(
+        self, proc: 'Proc', pc: 'ProcContext', context: dict[str, Any], redirect: bool = True
+    ) -> tuple[Any, int, str]:
+        """Run task; return (ret, error, log_filename). redirect=False for single/debug (logs to console)."""
+        if proc.user_func is None:
+            raise UserError('Proc has no user function')
+        return run_task_with_redirect(proc.user_func, pc, context, redirect=redirect)
+
+    def record_task_start(self, proc: 'Proc') -> None:
+        """Record task start in task DB (used by runners)."""
+        if proc.name is not None:
+            task_db.on_task_start(proc.name, datetime.datetime.now(datetime.UTC), proc.run_id)
+
+    def get_log_filename(self, name: str) -> str:
+        """Return log file path for a proc name (used by runners)."""
+        return os.path.join(str(self.context['logdir']), name + '.log')
+
+    def raise_user_error(self, msg: str) -> UserError:
+        """Return UserError for message (used by runners)."""
+        return UserError(msg)
+
+    def handle_sync_request(self, request: dict[str, Any]) -> dict[str, Any]:
+        """Handle a request from a task synchronously; return response dict (used by SyncChannel and collect)."""
+        msg = dict(request)
+        if msg['req'] == 'get-input':
+            input_ = self.term.get_input(message=msg.get('message', ''), password=msg.get('password', False))
+            msg['resp'] = input_
+            return msg
+        if msg['req'] == 'create-proc':
+            proc_name = self.create_proc(msg['proto_name'], msg.get('proc_name'))
+            msg['proc_name'] = proc_name
+            return msg
+        if msg['req'] == 'start-procs':
+            self.start_procs(msg['names'])
+            return msg
+        if msg['req'] == 'check-complete':
+            names = msg['names']
+            # In single-process mode, run pending tasks until requested names are complete or failed
+            # (otherwise the waiting task would deadlock: other procs only run when current one returns)
+            if self.mode == 'single':
+                # Ensure requested procs are started (task may have called wait(create(), create()) without start())
+                for name in names:
+                    if name in self.procs and self.procs[name].state == ProcState.IDLE:
+                        self.start_proc(name)
+                while not self.check_complete(names) and not self.check_failure(names):
+                    self._try_execute_any_single_wait()
+            msg['complete'] = self.check_complete(names)
+            msg['failure'] = self.check_failure(names)
+            return msg
+        if msg['req'] == 'get-results':
+            msg['results'] = self.context['results']
+            return msg
+        raise UserError(f'unknown call: {msg["req"]}')
+
+    def complete_proc(self, p: 'Proc', output: Any, error: int, log_filename: str) -> None:
+        """Apply completion state (used by collect and SingleProcessRunner)."""
+        p.process = None
+        p.output = output
+        p.error = error
+        p.state = ProcState.SUCCEEDED if error == Proc.ERROR_NONE else ProcState.FAILED
+        p.log_filename = log_filename
+        logger.info(f'proc "{p.name}" collected: ret = {p.output}')
+        self.context['results'][p.name] = p.output
+        logger.info(f'new context: {self.context}')
+        for l in p.locks:
+            del self.locks[l]
+        if self.task_db_path is not None:
+            status = (
+                "success" if p.state in SUCCEEDED_STATES else ("timeout" if p.error == Proc.ERROR_TIMEOUT else "failed")
+            )
+            task_db.on_task_end(p.run_id, datetime.datetime.now(datetime.UTC), status)
+        self.term.end_proc(p)
+
+
+def run_task_with_redirect(
+    user_func: Callable[..., Any],
+    pc: 'ProcContext',
+    context: dict[str, Any],
+    redirect: bool = True,
+) -> tuple[Any, int, str]:
+    """Run user task. If redirect=True, stdout/stderr go to log file; if False (debug/single), logs to console."""
+    name = pc.proc_name
+    log_filename = os.path.join(str(context['logdir']), name + '.log')
+    error = Proc.ERROR_NONE
+    ret = None
+    with open(log_filename, 'w', encoding='utf-8') as log_file:
+        if redirect:
+            saved_stdout_fd = os.dup(1)
+            saved_stderr_fd = os.dup(2)
+            try:
+                log_fd = log_file.fileno()
+                os.dup2(log_fd, 1)
+                os.dup2(log_fd, 2)
+                sys.stdout = log_file
+                sys.stderr = log_file
+            except OSError:
+                pass  # restore below
+        try:
+            try:
+                ret = user_func(pc, **pc.args)
+            except Exception as e:  # pylint: disable=broad-exception-caught
+                _, _, tb = sys.exc_info()
+                info = str(e) + '\n' + ''.join(traceback.format_tb(tb))
+                stderr = getattr(e, 'stderr', None)
+                if stderr is not None and isinstance(stderr, bytes):
+                    info += f'\nSTDERR_FULL:\n{stderr.decode("utf-8")}'
+                log_file.write(info)
+                if not redirect:
+                    sys.stderr.write(info)
+                error = Proc.ERROR_EXCEPTION
+        finally:
+            if redirect:
+                try:
+                    os.dup2(saved_stdout_fd, 1)
+                    os.dup2(saved_stderr_fd, 2)
+                    os.close(saved_stdout_fd)
+                    os.close(saved_stderr_fd)
+                except (OSError, NameError):
+                    pass
+                sys.stdout = sys.__stdout__
+                sys.stderr = sys.__stderr__
+    return (ret, error, log_filename)
+
 
 # Objects of this class only live inside the individual proc threads
 class ProcContext:
 
-    def __init__(self, proc_name: str, context: dict[str, Any], queue_to_proc: mp.Queue, queue_to_master: mp.Queue):
+    def __init__(self, proc_name: str, context: dict[str, Any], queue_to_proc: Any, queue_to_master: Any):
         self.proc_name = proc_name
         self.results = context['results']
         self.params = context['params']
@@ -1251,7 +1291,7 @@ class Proto:
             pattern_parts = []
             param_index = 0
 
-            for i, part in enumerate(parts):
+            for idx, part in enumerate(parts):
                 if not part:
                     continue
                 if part.startswith('[') and part.endswith(']'):
@@ -1259,7 +1299,7 @@ class Proto:
                     param = part[1:-1]  # Remove [ and ]
                     # Find next non-empty literal (must equal configured separator)
                     next_literal = None
-                    for p in parts[i + 1 :]:
+                    for p in parts[idx + 1 :]:
                         if p and not (p.startswith('[') and p.endswith(']')):
                             next_literal = p
                             break
@@ -1357,8 +1397,9 @@ class Proc:
         self.log_filename = ''
         self.run_id = str(uuid.uuid4())  # Unique id for this run; used by task DB to match start/end
 
-        # Main function
+        # Main function (wrapper for multiprocessing); user_func is the raw decorated callable
         self.func: Any | None = None
+        self.user_func: Any | None = None
 
         # State
         self.start_time: float | None = None
@@ -1386,64 +1427,17 @@ class Proc:
 
     # Called immediately after initialization
     def __call__(self, f: F) -> F:
-        # Queue is bi-directional queue to provide return value on exit (and maybe other things in the future
         def func(queue_to_proc: mp.Queue, queue_to_master: mp.Queue, context: dict[str, Any], name: str) -> None:
-            # Capture all output (Python and subprocesses) by redirecting at the OS fd level.
-            # Only reassigning sys.stdout/stderr would not capture output from subprocesses
-            # (subprocess.run, Popen, os.system, 'sh' library, etc.) because they inherit
-            # file descriptors 1 and 2 from this process; we must dup2() so those fds
-            # point to the log file before any child is spawned.
-            # https://stackoverflow.com/questions/30793624/grabbing-stdout-of-a-function-with-multiprocessing
             logger.info(f'proc "{name}" started')
-
             pc = ProcContext(name, context, queue_to_proc, queue_to_master)
-            error = Proc.ERROR_NONE
-            ret = None
-
-            log_filename = os.path.join(str(context['logdir']), name + '.log')
-            with open(log_filename, 'w', encoding='utf-8') as log_file:
-                # Save original stdout/stderr fds so we can restore them
-                saved_stdout_fd = os.dup(1)
-                saved_stderr_fd = os.dup(2)
-                try:
-                    # Redirect OS-level fds so subprocesses inherit the log file
-                    log_fd = log_file.fileno()
-                    os.dup2(log_fd, 1)
-                    os.dup2(log_fd, 2)
-                    sys.stdout = log_file
-                    sys.stderr = log_file
-
-                    try:
-                        ret = f(pc, **pc.args)  # Execute process
-                    except Exception as e:  # Catch all exceptions, so pylint: disable=broad-exception-caught
-                        _, _, tb = sys.exc_info()
-                        info = str(e) + '\n' + ''.join(traceback.format_tb(tb))
-
-                        # Exceptions from 'sh' sometimes have a separate stderr field
-                        stderr = getattr(e, 'stderr', None)
-                        if stderr is not None and isinstance(stderr, bytes):
-                            info += f'\nSTDERR_FULL:\n{stderr.decode("utf-8")}'
-
-                        log_file.write(info)
-                        error = Proc.ERROR_EXCEPTION
-                finally:
-                    # Restore OS fds and Python streams before closing log_file
-                    os.dup2(saved_stdout_fd, 1)
-                    os.dup2(saved_stderr_fd, 2)
-                    os.close(saved_stdout_fd)
-                    os.close(saved_stderr_fd)
-                    sys.stdout = sys.__stdout__
-                    sys.stderr = sys.__stderr__
-
-            msg = {'req': 'proc-complete', 'value': ret, 'log_filename': log_filename, 'error': error}
-
+            ret, error, log_filename = run_task_with_redirect(f, pc, context)
             logger.info(f'proc "{name}" ended: ret = {ret}')
-
-            queue_to_master.put(msg)  # Provide return value from function
+            queue_to_master.put({'req': 'proc-complete', 'value': ret, 'log_filename': log_filename, 'error': error})
 
         if self.name is None:
             self.name = f.__name__
 
+        self.user_func = f
         self.func = func
         ProcManager.get_inst().add_proc(self)
 
@@ -1476,11 +1470,27 @@ def start(*names: str) -> None:
     return ProcManager.get_inst().start_procs(list(names))
 
 
-def create(proto_name: str, proc_name: str | None = None) -> str:
+def _fill_proto_pattern(pattern: str, params: dict[str, Any]) -> str:
+    """Replace [param] placeholders in pattern with values from params."""
+    result = pattern
+    for key, value in params.items():
+        result = result.replace(f'[{key}]', str(value))
+    return result
+
+
+def create(proto_name: str, proc_name: str | None = None, **kwargs: Any) -> str:
+    """Create a proc from a proto. Pass pattern params as keyword args (e.g. create('foo::[x]', x=1))."""
+    if kwargs:
+        proto_name = _fill_proto_pattern(proto_name, kwargs)
+        proc_name = None
     return ProcManager.get_inst().create_proc(proto_name, proc_name)
 
 
-def run(proto_name: str, proc_name: str | None = None) -> None:
+def run(proto_name: str, proc_name: str | None = None, **kwargs: Any) -> None:
+    """Create and start a proc. Pass pattern params as keyword args (e.g. run('foo::[x]', x=1))."""
+    if kwargs:
+        proto_name = _fill_proto_pattern(proto_name, kwargs)
+        proc_name = None
     proc_name = ProcManager.get_inst().create_proc(proto_name, proc_name)
     ProcManager.get_inst().start_proc(proc_name)
 

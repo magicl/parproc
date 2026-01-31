@@ -40,7 +40,10 @@ class SimpleTest(TestCase):
 
     def setUp(self):
         logging.basicConfig(level=logging.DEBUG)
-        pp.ProcManager.get_inst().set_options(dynamic=False)
+        mode = os.environ.get('PARPROC_TEST_MODE', 'mp')
+        pp.ProcManager.get_inst().set_options(mode=mode, dynamic=False)
+        if mode == 'single':
+            pp.ProcManager.get_inst().set_options(parallel=1)
 
     @parameterized.expand(
         [
@@ -96,11 +99,13 @@ class SimpleTest(TestCase):
 
         pp.wait_for_all()
 
-        if parallel > 1:
+        mode = os.environ.get('PARPROC_TEST_MODE', 'mp')
+        if parallel > 1 and mode != 'single':
             self.assert_proc_start_order(['t1', 't2'])  # t1 or t3 could start first, but both before t2
             self.assert_proc_start_order(['t3', 't2'])
         else:
-            self.assert_proc_start_order(['t1', 't2', 't3'])  # In non-parallel mode, these go in sequence
+            # Sequential (parallel=1 or single mode: only one task runs at a time)
+            self.assert_proc_start_order(['t1', 't2', 't3'])
 
         self.assert_proc_non_overlapping(['t1', 't2'])  # Share lock, so should not overlap
 
@@ -170,7 +175,10 @@ class SimpleTest(TestCase):
 
         log_file = os.path.join(pp.ProcManager.get_inst().context['logdir'], 'logger.log')
         with open(log_file, encoding='utf-8') as f:
-            self.assertEqual(f.read(), 'this is the log output\nthis is an error\n')
+            content = f.read()
+        # In single mode we don't capture stdout/stderr to the log file (logs go to console)
+        if os.environ.get('PARPROC_TEST_MODE') != 'single':
+            self.assertEqual(content, 'this is the log output\nthis is an error\n')
 
     def test_dependency_failure(self):
         """Verifies that dependent procs fail if a dependency fails"""

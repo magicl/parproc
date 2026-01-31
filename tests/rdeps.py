@@ -1,8 +1,8 @@
-# pylint: disable=unused-argument
+# pylint: disable=unused-argument,protected-access
+# (protected-access: tests exercise internal rdep pattern implementation.)
 import logging
 import multiprocessing as mp
 import time
-from typing import cast
 from unittest import TestCase
 
 import parproc as pp
@@ -53,7 +53,7 @@ class RdepTest(TestCase):
             return f'B_{a}_{b}'
 
         # Create setup proc first, then start B - setup should be injected
-        setup_name = pp.create('setup::test')
+        pp.create('setup::test')
         proc_name = pp.create('B::test::2')
         pp.start(proc_name)
         pp.wait(proc_name)
@@ -120,6 +120,7 @@ class RdepTest(TestCase):
 
         # Start C - setup should be injected again
         pp.wait_clear()
+
         @pp.Proc(name='setup', rdeps=['B::[a]::[b]', 'C::[x]::[y]'])
         def setup_proc2(context: pp.ProcContext) -> str:
             return 'setup_done'
@@ -538,6 +539,7 @@ class RdepPatternMatchingTest(TestCase):
 
         # Test 2: B::1::2 should match all patterns
         pp.wait_clear()
+
         @pp.Proc(name='setup1', rdeps=['B::[a]::[b]'])
         def setup1_v2(context: pp.ProcContext) -> str:
             return 'setup1'
@@ -569,6 +571,7 @@ class RdepPatternMatchingTest(TestCase):
 
         # Test 3: B::1::3 should match B::[a]::[b] and B::1::[b], but not B::[a]::2 or B::1::2
         pp.wait_clear()
+
         @pp.Proc(name='setup1', rdeps=['B::[a]::[b]'])
         def setup1_v3(context: pp.ProcContext) -> str:
             return 'setup1'

@@ -20,8 +20,8 @@ from rich.progress import (
 )
 from rich.syntax import Syntax
 
-from .state import FAILED_STATES, ProcState, SUCCEEDED_STATES
 from . import task_db
+from .state import FAILED_STATES, SUCCEEDED_STATES, ProcState
 
 if TYPE_CHECKING:
     from .par import Proc
@@ -104,7 +104,9 @@ class Term:
             self._ensure_progress()
             if self.progress is not None:
                 description = self._get_description(p)
-                expected = task_db.get_expected_duration(p.name) if task_db.get_current() else None
+                expected = (
+                    task_db.get_expected_duration(p.name) if task_db.get_current() and p.name is not None else None
+                )
                 if expected is not None and expected > 0:
                     disp.expected_duration = expected
                     task_id = self.progress.add_task(description, total=expected)
@@ -332,7 +334,7 @@ class Term:
 
     def _render_display(self) -> Group | str:
         """Render the complete display with completed tasks at top, then active progress below."""
-        display_parts = []
+        display_parts: list[str | Panel | Progress] = []
 
         # Render all inactive items to ensure they remain visible
         # Track which ones are new to prevent duplication in the final output
@@ -392,7 +394,9 @@ class Term:
                     # Use Rich markup to create clickable link
                     panel_title = f"[link=file://{abs_path}]{disp.proc.log_filename}[/link]"
 
-                log_panel = Panel(
+                # Use Panel.fit() so the box width is derived from content measurement
+                # (cell_len), which correctly accounts for unicode wide characters.
+                log_panel = Panel.fit(
                     log_content,
                     title=panel_title,
                     border_style="red" if disp.proc.state in FAILED_STATES else "dim",
