@@ -1154,6 +1154,11 @@ class ProcManager:  # pylint: disable=too-many-public-methods
             proc_name = self.create_proc(msg['proto_name'], msg.get('proc_name'))
             msg['proc_name'] = proc_name
             return msg
+        if msg['req'] == 'run-proc':
+            proc_name = self.create_proc(msg['proto_name'], msg.get('proc_name'))
+            self.start_proc(proc_name)
+            msg['proc_name'] = proc_name
+            return msg
         if msg['req'] == 'start-procs':
             self.start_procs(msg['names'])
             return msg
@@ -1296,6 +1301,10 @@ class ProcContext:
     def create(self, proto_name: str, proc_name: str | None = None) -> str:
         resp = self._cmd(req='create-proc', proto_name=proto_name, proc_name=proc_name)
         return str(resp['proc_name'])
+
+    def run(self, proto_name: str, proc_name: str | None = None) -> None:
+        """Create and start a proc (single round-trip run-proc command)."""
+        self._cmd(req='run-proc', proto_name=proto_name, proc_name=proc_name)
 
     def start(self, *names: str) -> None:
         self._cmd(req='start-procs', names=list(names))

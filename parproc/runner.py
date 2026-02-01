@@ -90,6 +90,7 @@ class MultiProcessRunner:
                 elif msg['req'] in (
                     'get-input',
                     'create-proc',
+                    'run-proc',
                     'start-procs',
                     'check-complete',
                     'get-results',
