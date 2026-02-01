@@ -1,4 +1,5 @@
 from .par import (
+    NO_FAILURES,
     Proc,
     ProcContext,
     ProcessError,
@@ -7,6 +8,8 @@ from .par import (
     UserError,
     clear,
     create,
+    get_procs,
+    get_protos,
     results,
     run,
     set_options,
@@ -15,8 +18,6 @@ from .par import (
     wait,
     wait_clear,
     wait_for_all,
-    get_procs,
-    get_protos,
 )
 
 __all__ = [
@@ -26,6 +27,7 @@ __all__ = [
     'ProcContext',
     'Proto',
     'Proc',
+    'NO_FAILURES',
     'wait_for_all',
     'results',
     'set_params',

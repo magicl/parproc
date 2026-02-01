@@ -4,6 +4,7 @@ import logging
 import multiprocessing as mp
 import os
 import re
+import signal
 import sys
 import tempfile
 import time
@@ -11,6 +12,7 @@ import traceback
 import uuid
 from collections import OrderedDict
 from collections.abc import Callable
+from enum import Enum
 from typing import Any, Optional, TypeVar, Union
 
 from . import task_db
@@ -36,6 +38,16 @@ DepInput = Union[str, Callable[..., DepSpecOrList]]
 NAME_PARAM_SEP = '::'
 
 
+class SpecialDep(Enum):
+    """Special dependency kinds: global conditions that are not other tasks."""
+
+    NO_FAILURES = 'no_failures'  # Satisfied only when no proc in the run has failed
+
+
+# Individual special deps exported on parproc (e.g. pp.NO_FAILURES)
+NO_FAILURES = SpecialDep.NO_FAILURES
+
+
 class UserError(Exception):
     pass
 
@@ -46,12 +58,45 @@ class ProcessError(Exception):
 
 logger = logging.getLogger('par')
 
+# Signal handlers installed once so we don't replace user handlers on every ProcManager()
+_signal_handlers_installed = False  # pylint: disable=invalid-name
+
+
+def _install_signal_handlers() -> None:
+    """Install handlers for SIGHUP, SIGTERM, SIGINT to abort all tasks and exit."""
+    global _signal_handlers_installed  # pylint: disable=global-statement
+    if _signal_handlers_installed:
+        return
+    _signal_handlers_installed = True
+
+    def _abort_handler(signum: int, _frame: Any) -> None:
+        manager = ProcManager.inst
+        if manager is not None:
+            for p in manager.procs.values():
+                if p.is_running() and p.process is not None:
+                    try:
+                        p.process.terminate()
+                    except OSError:
+                        pass
+        sys.stderr.write('Tasks Aborted\n')
+        sys.stderr.flush()
+        sys.exit(128 + signum)
+
+    for sig_name in ('SIGHUP', 'SIGINT', 'SIGTERM'):
+        sig = getattr(signal, sig_name, None)
+        if sig is not None:
+            try:
+                signal.signal(sig, _abort_handler)
+            except (ValueError, OSError):
+                pass  # e.g. SIGKILL cannot be caught, or not main thread
+
 
 class ProcManager:  # pylint: disable=too-many-public-methods
 
     inst: Optional['ProcManager'] = None  # Singleton instance
 
     def __init__(self):
+        _install_signal_handlers()
         self.logger = logger
         self.pending_now: list[str] = []
         self.clear()
@@ -384,7 +429,7 @@ class ProcManager:  # pylint: disable=too-many-public-methods
                 p.deps.append(rdep_proc_name)
         # Check if any dependencies have a higher wave than current proc - this could cause deadlock
         for d in p.deps:
-            if d in self.procs:
+            if isinstance(d, str) and d in self.procs:
                 dep_proc = self.procs[d]
                 if dep_proc.wave > p.wave:
                     raise UserError(
@@ -663,11 +708,16 @@ class ProcManager:  # pylint: disable=too-many-public-methods
 
         return resolved_deps
 
-    def _resolve_proto_dependencies(self, proto: 'Proto', all_args: dict[str, Any], proc_name: str) -> list[str]:
+    def _resolve_proto_dependencies(
+        self, proto: 'Proto', all_args: dict[str, Any], proc_name: str
+    ) -> tuple[list[str], list[SpecialDep]]:
         """
         Resolve all dependencies for a proto.
 
-        Two-pass resolution:
+        Deps may contain normal deps (str, callable) and special deps (SpecialDep).
+        Normal deps are expanded and resolved to proc names; special deps are returned as-is.
+
+        Two-pass resolution for normal deps:
         1. First pass: expand all callable (lambda) dependencies - they can return DepSpec or list[DepSpec]
         2. Second pass: resolve each dep (extract fields, filter args, handle tuples, generate names),
            match against proto patterns, and create procs if needed
@@ -678,13 +728,15 @@ class ProcManager:  # pylint: disable=too-many-public-methods
             proc_name: Name of the proc being created
 
         Returns:
-            List of resolved dependency names (proc names, not proto patterns)
+            Tuple of (resolved proc names, special deps)
         """
+        normal_deps = [d for d in proto.deps if not isinstance(d, SpecialDep)]
+        special_deps = [d for d in proto.deps if isinstance(d, SpecialDep)]
         # First pass: expand all callable (lambda) dependencies
-        expanded_deps = self._expand_dependencies(proto.deps, all_args, proc_name)
-
+        expanded_deps = self._expand_dependencies(normal_deps, all_args, proc_name)
         # Second pass: resolve each dependency
-        return self._resolve_expanded_dependencies(expanded_deps, all_args)
+        resolved = self._resolve_expanded_dependencies(expanded_deps, all_args)
+        return (resolved, special_deps)
 
     def _find_matching_proto(self, name: str) -> tuple['Proto', dict[str, Any]] | None:
         """
@@ -776,8 +828,8 @@ class ProcManager:  # pylint: disable=too-many-public-methods
         if proc_name in self.procs:
             return proc_name
 
-        # Resolve dependencies
-        resolved_deps = self._resolve_proto_dependencies(proto, all_args, proc_name)
+        # Resolve dependencies (normal deps -> proc names; special deps passed through)
+        resolved_deps, special_deps = self._resolve_proto_dependencies(proto, all_args, proc_name)
 
         # Create proc based on prototype
         proc = Proc(
@@ -790,6 +842,7 @@ class ProcManager:  # pylint: disable=too-many-public-methods
             proto=proto,
             timeout=proto.timeout,
             wave=proto.wave,
+            special_deps=special_deps,
         )
 
         # Add new proc, by calling procs __call__ function
@@ -844,6 +897,8 @@ class ProcManager:  # pylint: disable=too-many-public-methods
             if l in self.locks:
                 return False
         for d in proc.deps:
+            if not isinstance(d, str):
+                continue
             if d not in self.procs or not self.procs[d].is_complete():
                 if d in self.procs and self.procs[d].is_failed():
                     proc.state = ProcState.FAILED_DEP
@@ -851,6 +906,21 @@ class ProcManager:  # pylint: disable=too-many-public-methods
                     proc.more_info = f'dependency "{self.procs[d].name}" failed'
                     self.term.completed_proc(proc)
                 return False
+        # Check special dependencies (global conditions)
+        for special_dep in proc.special_deps:
+            if special_dep == SpecialDep.NO_FAILURES:
+                if any(p.state in FAILED_STATES for p in self.procs.values()):
+                    logger.debug(f'Proc "{proc.name}" not started: a task has failed')
+                    proc.state = ProcState.FAILED_DEP
+                    proc.error = Proc.ERROR_DEP_FAILED
+                    proc.more_info = 'run aborted: a task has failed'
+                    self.term.completed_proc(proc)
+                    return False
+            else:
+                raise UserError(
+                    f'Unrecognized special dependency {special_dep!r} on proc "{proc.name}". '
+                    f'Supported: {[m.name for m in SpecialDep]}.'
+                )
         if proc.state == ProcState.WANTED:
             self.execute(proc)
         return True
@@ -865,7 +935,7 @@ class ProcManager:  # pylint: disable=too-many-public-methods
                 # Check if this lower wave proc is ready to run (all its dependencies are complete)
                 can_run = True
                 for dep in p.deps:
-                    if dep not in self.procs or not self.procs[dep].is_complete():
+                    if not isinstance(dep, str) or dep not in self.procs or not self.procs[dep].is_complete():
                         can_run = False
                         break
                 if can_run:
@@ -881,6 +951,8 @@ class ProcManager:  # pylint: disable=too-many-public-methods
                 return False
 
         for d in proc.deps:
+            if not isinstance(d, str):
+                continue
             if d not in self.procs:
                 if not self.allow_missing_deps:
                     raise UserError(
@@ -904,6 +976,22 @@ class ProcManager:  # pylint: disable=too-many-public-methods
             elif not self.procs[d].is_complete():
                 logger.debug(f'Proc "{proc.name}" not started due to unfinished dependency "{d}"')
                 return False
+
+        # Check special dependencies (global conditions)
+        for special_dep in proc.special_deps:
+            if special_dep == SpecialDep.NO_FAILURES:
+                if any(p.state in FAILED_STATES for p in self.procs.values()):
+                    logger.debug(f'Proc "{proc.name}" not started: a task has failed')
+                    proc.state = ProcState.FAILED_DEP
+                    proc.error = Proc.ERROR_DEP_FAILED
+                    proc.more_info = 'run aborted: a task has failed'
+                    self.term.completed_proc(proc)
+                    return False
+            else:
+                raise UserError(
+                    f'Unrecognized special dependency {special_dep!r} on proc "{proc.name}". '
+                    f'Supported: {[m.name for m in SpecialDep]}.'
+                )
 
         # If number of parallel processes limit has not been reached
         if sum(1 for name, p in self.procs.items() if p.is_running()) >= self.parallel:
@@ -1100,6 +1188,17 @@ def run_task_with_redirect(
     ret = None
     with open(log_filename, 'w', encoding='utf-8') as log_file:
         if redirect:
+            # Ensure the task does not see a TTY (e.g. isatty() is False). Redirect stdin from
+            # /dev/null; stdout/stderr are redirected to the log file below.
+            try:
+                with open(os.devnull, encoding='utf-8') as devnull:
+                    os.dup2(devnull.fileno(), 0)
+            except OSError:
+                pass
+            # Env vars so apps treat this as non-interactive: TERM=dumb (traditional),
+            # NO_COLOR (https://no-color.org) for tools that respect it.
+            os.environ['TERM'] = 'dumb'
+            os.environ['NO_COLOR'] = '1'
             saved_stdout_fd = os.dup(1)
             saved_stderr_fd = os.dup(2)
             try:
@@ -1210,11 +1309,12 @@ class Proto:
     - The proto pattern: create_proc('foo::[x]::[y]') - requires proc_name to be provided
     - A filled-out name: create_proc('foo::a::2') - automatically extracts x='a', y='2' from the name
 
-    Dependencies can be:
+    Dependencies (deps) can be:
     - Existing proc names (strings)
     - Proto patterns (e.g., "dep-[x]-[y]") - extracts matching args from parent proc's args
     - Filled-out names (e.g., "dep-test-42") - automatically matches proto pattern and creates proc
     - Callables (lambdas) that return str or list[str] - called with manager and proc args
+    - Special dep values (e.g. pp.NO_FAILURES) - global conditions, passed in the same deps list
 
     Dependencies are automatically matched against proto patterns and created if not found.
     Type casting is performed automatically based on the proto function's type annotations.
@@ -1224,7 +1324,7 @@ class Proto:
         self,
         name: str | None = None,
         f: F | None = None,
-        deps: list[DepInput] | None = None,
+        deps: list[DepInput] | list[DepInput | SpecialDep] | None = None,
         rdeps: list[str] | None = None,
         locks: list[str] | None = None,
         now: bool = False,
@@ -1240,14 +1340,21 @@ class Proto:
                 f'Proto deps must be a list, got {type(deps).__name__}. '
                 f'If you want to use a lambda dependency, wrap it in a list: deps=[lambda ...]'
             )
-
-        self.deps = deps if deps is not None else []
+        _deps = deps if deps is not None else []
+        for d in _deps:
+            if not isinstance(d, (str, SpecialDep)) and not callable(d):
+                raise UserError(
+                    f'Proto deps must contain str, callable, or SpecialDep values, got {type(d).__name__!r}.'
+                )
+        self.deps = _deps
         self.rdeps = rdeps if rdeps is not None else []
         self.locks = locks if locks is not None else []
         self.now = now  # Whether proc will start once created
         self.args = args if args is not None else {}
         self.timeout = timeout
         self.wave = wave
+        # special_deps are stored inside deps; extracted when resolving
+        self.special_deps: list[SpecialDep] = [d for d in _deps if isinstance(d, SpecialDep)]
 
         # Initialize regex attributes (will be set in _build_regex_pattern)
         self.regex_pattern: re.Pattern[str] | None = None
@@ -1349,7 +1456,6 @@ class Proto:
             value_str = match.group(param)
             # Type casting will be done later based on function signature
             extracted[param] = value_str
-
         return extracted
 
 
@@ -1357,7 +1463,7 @@ class Proc:
     """
     Decorator for processes
     name   - identified name of process
-    deps   - process dependencies. will not be run until these have run
+    deps   - process dependencies (proc names and/or SpecialDep). will not be run until these are satisfied
     locks  - list of locks. only one process can own a lock at any given time
     """
 
@@ -1372,7 +1478,7 @@ class Proc:
         name: str | None = None,
         f: F | None = None,
         *,
-        deps: list[str] | None = None,
+        deps: list[str] | list[str | SpecialDep] | None = None,
         rdeps: list[str] | None = None,
         locks: list[str] | None = None,
         now: bool = False,
@@ -1380,10 +1486,11 @@ class Proc:
         proto: Proto | None = None,
         timeout: float | None = None,
         wave: int = 0,
+        special_deps: list[SpecialDep] | None = None,
     ):
+        # special_deps is only set when creating from a proto; user puts special deps in deps array
         # Input properties
         self.name = name
-        self.deps = deps if deps is not None else []
         self.rdeps = rdeps if rdeps is not None else []
         self.locks = locks if locks is not None else []
         self.now = now
@@ -1392,6 +1499,16 @@ class Proc:
         self.timeout = timeout
         # Wave defaults to proto's wave if proto exists, otherwise use provided wave (default 0)
         self.wave = proto.wave if proto is not None else wave
+        if special_deps is not None:
+            self.deps = deps if deps is not None else []
+            self.special_deps = special_deps
+        else:
+            _deps = deps if deps is not None else []
+            self.deps = [d for d in _deps if isinstance(d, str)]
+            self.special_deps = [d for d in _deps if isinstance(d, SpecialDep)]
+            for d in _deps:
+                if not isinstance(d, (str, SpecialDep)):
+                    raise UserError(f'Proc deps must contain str or SpecialDep values, got {type(d).__name__!r}.')
 
         # Utils
         self.log_filename = ''

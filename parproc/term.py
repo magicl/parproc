@@ -7,8 +7,9 @@ from collections import OrderedDict
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from rich.console import Console, Group
+from rich.console import Console
 from rich.live import Live
+from rich.markup import escape
 from rich.panel import Panel
 from rich.progress import (
     BarColumn,
@@ -60,8 +61,7 @@ class Term:
     def __init__(self, dynamic: bool = True):
         # Keep track of active lines in terminal, i.e. lines we will go back and change
         self.active: OrderedDict["Proc", Displayable] = OrderedDict()
-        self.inactive: list[Displayable] = []  # Completed processes
-        self.rendered_inactive: set["Proc"] = set()  # Track which inactive procs have been rendered (by proc object)
+        self.inactive: list[Displayable] = []  # Completed processes (printed to console when done, not in live area)
         self.dynamic = dynamic  # True to dynamically update shell
         self.last_update: float = 0.0  # To limit update rate
         self.console = Console()
@@ -76,7 +76,6 @@ class Term:
         self.progress = None
         self.active = OrderedDict()
         self.inactive = []
-        self.rendered_inactive = set()
 
     def _ensure_progress(self) -> None:
         """Initialize Progress and Live display if needed."""
@@ -90,7 +89,12 @@ class Term:
                 console=self.console,
                 transient=False,  # Keep completed tasks visible
             )
-            self.live = Live(self._render_display(), refresh_per_second=10, console=self.console)
+            self.live = Live(
+                self._render_display(),
+                refresh_per_second=10,
+                console=self.console,
+                vertical_overflow="visible",  # Let terminal scroll so all running tasks stay visible
+            )
             self.live.start()
 
     def start_proc(self, p: "Proc") -> None:
@@ -147,30 +151,19 @@ class Term:
             if self.progress is not None and disp.task_id is not None:
                 self.progress.remove_task(disp.task_id)
 
-            # Move to inactive (will be displayed at top of live display)
+            # Print completed task to console once (scrolls up; not part of live update area)
+            self._print_completed_task(disp)
+
+            # Move to inactive (for bookkeeping; no longer shown in live display)
             self.inactive.append(disp)
             del self.active[p]
 
-            # If this was the last task, render final display and clean up
+            # If this was the last task, stop live display and clean up
             if len(self.active) == 0:
                 if self.live is not None:
-                    # Clear rendered tracking so all items are shown in final display
-                    self.rendered_inactive = set()
-                    # Render final display showing all completed tasks (no progress bar)
-                    self.live.update(self._render_display())
                     self.live.stop()
                     self.live = None
-                    # Clear inactive after Live display is stopped
-                    self.inactive = []
-                    self.rendered_inactive = set()
-                elif self.progress is not None:
-                    # Clear rendered tracking so all items are shown
-                    self.rendered_inactive = set()
-                    # If live wasn't running but progress exists, render final state directly
-                    self.console.print(self._render_display())
-                    # Clear inactive and rendered tracking after printing
-                    self.inactive = []
-                    self.rendered_inactive = set()
+                self.inactive = []
                 self.progress = None
             else:
                 # Update live display to show completed task at top, with remaining progress below
@@ -327,94 +320,67 @@ class Term:
             if self.progress is None:
                 self._ensure_progress()
             else:
-                self.live = Live(self._render_display(), refresh_per_second=10, console=self.console)
+                self.live = Live(
+                    self._render_display(),
+                    refresh_per_second=10,
+                    console=self.console,
+                    vertical_overflow="visible",
+                )
                 self.live.start()
 
         return result
 
-    def _render_display(self) -> Group | str:
-        """Render the complete display with completed tasks at top, then active progress below."""
-        display_parts: list[str | Panel | Progress] = []
+    def _print_completed_task(self, disp: Displayable) -> None:
+        """Print a single completed task to the console (scrollback). Not part of the live update area."""
+        if disp.proc.state in SUCCEEDED_STATES:
+            status = "[bold green]✓[/bold green]"
+        elif disp.proc.state == ProcState.FAILED_DEP:
+            status = "[bold red]🚫[/bold red]"
+        else:
+            status = "[bold red]✗[/bold red]"
 
-        # Render all inactive items to ensure they remain visible
-        # Track which ones are new to prevent duplication in the final output
-        inactive_to_render = list(self.inactive)
+        name_escaped = escape(disp.proc.name or "")
+        time_escaped = escape(disp.execution_time)
+        completion_line = f"{status} {name_escaped}{time_escaped}"
+        self.console.print(completion_line)
 
-        # Mark new items as rendered (using proc object as key)
-        new_items = [disp for disp in inactive_to_render if disp.proc not in self.rendered_inactive]
-        self.rendered_inactive.update(disp.proc for disp in new_items)
+        if disp.chunks:
+            chunk_parts = []
+            for i, chunk in enumerate(disp.chunks):
+                line_range = f"lines {chunk.start_line}-{chunk.end_line}"
+                if i > 0:
+                    chunk_parts.append(f"\n--- {line_range} ---\n")
+                else:
+                    chunk_parts.append(f"--- {line_range} ---\n")
+                chunk_parts.append(chunk.content)
+            log_content_str = "".join(chunk_parts)
+            lexer = "python" if disp.proc.state in FAILED_STATES else "text"
+            log_content = Syntax(
+                log_content_str,
+                lexer=lexer,
+                theme="monokai",
+                line_numbers=False,
+                word_wrap=True,
+            )
+            panel_title = None
+            if disp.proc.state in FAILED_STATES and disp.proc.log_filename:
+                abs_path = os.path.abspath(disp.proc.log_filename)
+                panel_title = f"[link=file://{abs_path}]{disp.proc.log_filename}[/link]"
+            log_panel = Panel.fit(
+                log_content,
+                title=panel_title,
+                border_style="red" if disp.proc.state in FAILED_STATES else "dim",
+            )
+            self.console.print(log_panel)
 
-        # Render completed tasks at the top
-        for disp in inactive_to_render:
-            # Status with checkmark, task name, and execution time
-            if disp.proc.state in SUCCEEDED_STATES:
-                status = "[bold green]✓[/bold green]"
-            elif disp.proc.state == ProcState.FAILED_DEP:
-                status = "[bold red]🚫[/bold red]"
-            else:
-                status = "[bold red]✗[/bold red]"
-
-            completion_line = f"{status} {disp.proc.name}{disp.execution_time}"
-            display_parts.append(completion_line)
-
-            # If there's log output, show it in its own box
-            if disp.chunks:
-                # Combine all chunks with separators
-                chunk_parts = []
-                for i, chunk in enumerate(disp.chunks):
-                    if i > 0:
-                        # Add separator between chunks
-                        line_range = f"lines {chunk.start_line}-{chunk.end_line}"
-                        chunk_parts.append(f"\n--- {line_range} ---\n")
-                    else:
-                        # First chunk - add line range at the start
-                        line_range = f"lines {chunk.start_line}-{chunk.end_line}"
-                        chunk_parts.append(f"--- {line_range} ---\n")
-
-                    chunk_parts.append(chunk.content)
-
-                log_content_str = "".join(chunk_parts)
-
-                # Use Python syntax highlighting for error logs (works well for tracebacks)
-                # For other content, try to auto-detect or use text
-                lexer = "python" if disp.proc.state in FAILED_STATES else "text"
-                log_content = Syntax(
-                    log_content_str,
-                    lexer=lexer,
-                    theme="monokai",
-                    line_numbers=False,
-                    word_wrap=True,
-                )
-
-                # Add filename as title if it's an error with a log file
-                panel_title = None
-                if disp.proc.state in FAILED_STATES and disp.proc.log_filename:
-                    # Make filename clickable using file:// protocol
-                    abs_path = os.path.abspath(disp.proc.log_filename)
-                    # Use Rich markup to create clickable link
-                    panel_title = f"[link=file://{abs_path}]{disp.proc.log_filename}[/link]"
-
-                # Use Panel.fit() so the box width is derived from content measurement
-                # (cell_len), which correctly accounts for unicode wide characters.
-                log_panel = Panel.fit(
-                    log_content,
-                    title=panel_title,
-                    border_style="red" if disp.proc.state in FAILED_STATES else "dim",
-                )
-                display_parts.append(log_panel)
-
-        # Add separator if we have both completed tasks and active progress
-        # if inactive_to_render and self.progress is not None:
-        #    display_parts.append("")  # Empty line separator
-
-        # Add active progress area below completed tasks
+    def _render_display(self):
+        """Render only the live-updated area: the progress bar(s) for running tasks.
+        Completed tasks are printed to the console once via _print_completed_task, so they
+        are not redrawn here (avoids flashing when the screen is full).
+        """
         if self.progress is not None:
-            display_parts.append(self.progress)
-
-        if not display_parts:
-            return ""  # Empty display
-
-        return Group(*display_parts)
+            return self.progress
+        return ""
 
     def _render_proc_static(self, disp: Displayable) -> None:
         """Render a process in static (non-dynamic) mode."""
