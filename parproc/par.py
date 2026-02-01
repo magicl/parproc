@@ -12,6 +12,7 @@ import traceback
 import uuid
 from collections import OrderedDict
 from collections.abc import Callable
+from pydantic import BaseModel
 from enum import Enum
 from typing import Any, Optional, TypeVar, Union
 
@@ -1530,6 +1531,11 @@ class Proc:
             ret, error, _exc_info = run_task(f, pc, context)
             log_filename = os.path.join(str(context['logdir']), name + '.log')
             logger.info(f'proc "{name}" ended: ret = {ret}')
+
+            #Convert pydantic models to dicts so they are pickleable
+            if isinstance(ret, BaseModel):
+                ret = ret.model_dump()
+
             import pickle as _pickle  # pylint: disable=import-outside-toplevel
 
             msg = {'req': 'proc-complete', 'value': ret, 'log_filename': log_filename, 'error': error}

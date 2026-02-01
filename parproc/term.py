@@ -205,6 +205,23 @@ class Term(ABC):
 
         return chunks
 
+    def _get_error_type_message(self, disp: Displayable) -> str:
+        """Short message for error type when task failed; empty when succeeded."""
+        if disp.proc.state in SUCCEEDED_STATES:
+            return ""
+        if disp.proc.state == ProcState.FAILED_DEP:
+            return " dependency failed"
+        # ProcState.FAILED with error code
+        err = getattr(disp.proc, "error", None)
+        ProcClass = type(disp.proc)
+        if err == ProcClass.ERROR_TIMEOUT:
+            return " timeout"
+        if err == ProcClass.ERROR_EXCEPTION:
+            return " exception"
+        if err == ProcClass.ERROR_NOT_PICKLEABLE:
+            return " not pickleable"
+        return " failed"
+
     def _print_completed_task(self, disp: Displayable) -> None:
         """Print a single completed task to the console (scrollback). Not part of the live update area."""
         if disp.proc.state in SUCCEEDED_STATES:
@@ -216,7 +233,14 @@ class Term(ABC):
 
         name_escaped = escape(disp.proc.name or "")
         time_escaped = escape(disp.execution_time)
-        completion_line = f"{status} {name_escaped}{time_escaped}"
+        error_msg = self._get_error_type_message(disp)
+        right_part = f"{time_escaped}{error_msg}"
+        left_part = f"{status} {name_escaped}"
+        # Align time + error at a fixed column (not all the way to the right)
+        time_column = 50
+        left_visible = 2 + len(disp.proc.name or "")
+        padding = max(1, time_column - left_visible)
+        completion_line = f"{left_part}{' ' * padding}{right_part}"
         self.console.print(completion_line)
 
         if disp.chunks:

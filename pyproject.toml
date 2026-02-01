@@ -27,6 +27,7 @@ classifiers = [
 ]
 
 dependencies = [
+    "pydantic>=2.10.6",
     "rich>=14.0.0",
 ]
 
@@ -44,6 +45,7 @@ build = [
     "wheel",
     "twine",
     "build",
+    "pydantic",
 ]
 
 [tool.setuptools]
