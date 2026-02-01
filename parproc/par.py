@@ -18,7 +18,7 @@ from typing import Any, Optional, TypeVar, Union
 from . import task_db
 from .runner import MultiProcessRunner, SingleProcessRunner
 from .state import FAILED_STATES, SUCCEEDED_STATES, ProcState
-from .term import Term
+from .term import Term, TermDynamic, TermSimple
 
 # pylint: disable=too-many-positional-arguments
 
@@ -100,7 +100,7 @@ class ProcManager:  # pylint: disable=too-many-public-methods
         self.logger = logger
         self.pending_now: list[str] = []
         self.clear()
-        self.term = Term(dynamic=sys.stdout.isatty())
+        self.term = TermDynamic() if sys.stdout.isatty() else TermSimple()
 
         # Options are set in set_options. Defaults:
         self.parallel = 100
@@ -134,7 +134,7 @@ class ProcManager:  # pylint: disable=too-many-public-methods
 
         if getattr(self, 'debug', False):
             self.parallel = 1
-            self.term.dynamic = False
+            self.term = TermSimple()
         if getattr(self, 'mode', 'mp') == 'single':
             self.runner = SingleProcessRunner()
         else:
@@ -165,7 +165,7 @@ class ProcManager:  # pylint: disable=too-many-public-methods
         if parallel is not None:
             self.parallel = parallel
         if dynamic is not None:
-            self.term.dynamic = dynamic
+            self.term = TermDynamic() if dynamic else TermSimple()
         if mode is not None:
             if mode not in ('mp', 'single'):
                 raise UserError(f'mode must be "mp" or "single", got {mode!r}')
@@ -176,7 +176,7 @@ class ProcManager:  # pylint: disable=too-many-public-methods
             if debug:
                 self.mode = 'single'
                 self.parallel = 1
-                self.term.dynamic = False
+                self.term = TermSimple()
                 self.runner = SingleProcessRunner()
         if allow_missing_deps is not None:
             self.allow_missing_deps = allow_missing_deps
