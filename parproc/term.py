@@ -404,7 +404,9 @@ class TermDynamic(Term):
                         description = self._get_description(proc)
                         if disp.expected_duration is not None and disp.start_time is not None:
                             elapsed = time.time() - disp.start_time
-                            completed = min(elapsed, disp.expected_duration)
+                            # Cap at 99% while running so we never show "stuck at 100%"
+                            # when a task runs longer than its expected duration
+                            completed = min(elapsed, disp.expected_duration * 0.99)
                             self.progress.update(
                                 disp.task_id,
                                 description=description,
