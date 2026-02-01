@@ -86,6 +86,10 @@ class Term(ABC):
         """Refresh display (e.g. progress bars). No-op for static display."""
         ...
 
+    def restore(self) -> None:
+        """Restore terminal (e.g. show cursor) after interrupt. Override in subclasses that use Live."""
+        pass
+
     # Call to notify of proc e.g. being canceled. Will show up as completed with message depending
     # on the state of the proc
     def completed_proc(self, p: "Proc") -> None:
@@ -309,11 +313,16 @@ class TermDynamic(Term):
         self.live: Live | None = None
 
     def clear(self) -> None:
+        self.restore()
+        self.progress = None
+        super().clear()
+
+    def restore(self) -> None:
+        """Stop Live display so terminal cursor and state are restored (e.g. on CTRL+C)."""
         if self.live is not None:
             self.live.stop()
             self.live = None
         self.progress = None
-        super().clear()
 
     def _ensure_progress(self) -> None:
         if self.progress is None:

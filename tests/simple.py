@@ -178,7 +178,13 @@ class SimpleTest(TestCase):
             content = f.read()
         # In single mode we don't capture stdout/stderr to the log file (logs go to console)
         if os.environ.get('PARPROC_TEST_MODE') != 'single':
-            self.assertEqual(content, 'this is the log output\nthis is an error\n')
+            # Both lines must be present; order can vary (stdout vs stderr to same pipe).
+            self.assertIn('this is the log output', content)
+            self.assertIn('this is an error', content)
+            self.assertEqual(
+                sorted(content.strip().split('\n')),
+                ['this is an error', 'this is the log output'],
+            )
 
     def test_dependency_failure(self):
         """Verifies that dependent procs fail if a dependency fails"""

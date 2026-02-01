@@ -78,6 +78,8 @@ def _install_signal_handlers() -> None:
                         p.process.terminate()
                     except OSError:
                         pass
+            if manager.term is not None:
+                manager.term.restore()
         sys.stderr.write('Tasks Aborted\n')
         sys.stderr.flush()
         sys.exit(128 + signum)
@@ -1101,13 +1103,11 @@ class ProcManager:  # pylint: disable=too-many-public-methods
             raise UserError('Proc has no name')
         return ProcContext(proc.name, context, queue_to_proc, queue_to_master)
 
-    def run_task(
-        self, proc: 'Proc', pc: 'ProcContext', context: dict[str, Any], redirect: bool = True
-    ) -> tuple[Any, int, str]:
-        """Run task; return (ret, error, log_filename). redirect=False for single/debug (logs to console)."""
+    def run_task_body(self, proc: 'Proc', pc: 'ProcContext', context: dict[str, Any]) -> tuple[Any, int, str | None]:
+        """Run task; return (ret, error, exception_info_or_None). No log file; runners handle logs."""
         if proc.user_func is None:
             raise UserError('Proc has no user function')
-        return run_task_with_redirect(proc.user_func, pc, context, redirect=redirect)
+        return run_task(proc.user_func, pc, context)
 
     def record_task_start(self, proc: 'Proc') -> None:
         """Record task start in task DB (used by runners)."""
@@ -1175,65 +1175,35 @@ class ProcManager:  # pylint: disable=too-many-public-methods
         self.term.end_proc(p)
 
 
-def run_task_with_redirect(
+def run_task(
     user_func: Callable[..., Any],
     pc: 'ProcContext',
     context: dict[str, Any],
-    redirect: bool = True,
-) -> tuple[Any, int, str]:
-    """Run user task. If redirect=True, stdout/stderr go to log file; if False (debug/single), logs to console."""
-    name = pc.proc_name
-    log_filename = os.path.join(str(context['logdir']), name + '.log')
+) -> tuple[Any, int, str | None]:
+    """Run user task. No redirect or log file; caller is responsible for stdout/stderr and logs.
+    On exception writes to sys.stderr and returns exception info string. Returns (ret, error, exception_info_or_None)."""
     error = Proc.ERROR_NONE
     ret = None
-    with open(log_filename, 'w', encoding='utf-8') as log_file:
-        if redirect:
-            # Ensure the task does not see a TTY (e.g. isatty() is False). Redirect stdin from
-            # /dev/null; stdout/stderr are redirected to the log file below.
-            try:
-                with open(os.devnull, encoding='utf-8') as devnull:
-                    os.dup2(devnull.fileno(), 0)
-            except OSError:
-                pass
-            # Env vars so apps treat this as non-interactive: TERM=dumb (traditional),
-            # NO_COLOR (https://no-color.org) for tools that respect it.
-            os.environ['TERM'] = 'dumb'
-            os.environ['NO_COLOR'] = '1'
-            saved_stdout_fd = os.dup(1)
-            saved_stderr_fd = os.dup(2)
-            try:
-                log_fd = log_file.fileno()
-                os.dup2(log_fd, 1)
-                os.dup2(log_fd, 2)
-                sys.stdout = log_file
-                sys.stderr = log_file
-            except OSError:
-                pass  # restore below
+    exc_info: str | None = None
+    try:
+        ret = user_func(pc, **pc.args)
+    except Exception as e:  # pylint: disable=broad-exception-caught
+        _, _, tb = sys.exc_info()
+        info = str(e) + '\n' + ''.join(traceback.format_tb(tb))
+        stderr = getattr(e, 'stderr', None)
+        if stderr is not None and isinstance(stderr, bytes):
+            info += f'\nSTDERR_FULL:\n{stderr.decode("utf-8")}'
+        sys.stderr.write(info)
+        sys.stderr.flush()
+        exc_info = info
+        error = Proc.ERROR_EXCEPTION
+    finally:
         try:
-            try:
-                ret = user_func(pc, **pc.args)
-            except Exception as e:  # pylint: disable=broad-exception-caught
-                _, _, tb = sys.exc_info()
-                info = str(e) + '\n' + ''.join(traceback.format_tb(tb))
-                stderr = getattr(e, 'stderr', None)
-                if stderr is not None and isinstance(stderr, bytes):
-                    info += f'\nSTDERR_FULL:\n{stderr.decode("utf-8")}'
-                log_file.write(info)
-                if not redirect:
-                    sys.stderr.write(info)
-                error = Proc.ERROR_EXCEPTION
-        finally:
-            if redirect:
-                try:
-                    os.dup2(saved_stdout_fd, 1)
-                    os.dup2(saved_stderr_fd, 2)
-                    os.close(saved_stdout_fd)
-                    os.close(saved_stderr_fd)
-                except (OSError, NameError):
-                    pass
-                sys.stdout = sys.__stdout__
-                sys.stderr = sys.__stderr__
-    return (ret, error, log_filename)
+            sys.stdout.flush()
+            sys.stderr.flush()
+        except OSError:
+            pass
+    return (ret, error, exc_info)
 
 
 # Objects of this class only live inside the individual proc threads
@@ -1547,7 +1517,8 @@ class Proc:
         def func(queue_to_proc: mp.Queue, queue_to_master: mp.Queue, context: dict[str, Any], name: str) -> None:
             logger.info(f'proc "{name}" started')
             pc = ProcContext(name, context, queue_to_proc, queue_to_master)
-            ret, error, log_filename = run_task_with_redirect(f, pc, context)
+            ret, error, _exc_info = run_task(f, pc, context)
+            log_filename = os.path.join(str(context['logdir']), name + '.log')
             logger.info(f'proc "{name}" ended: ret = {ret}')
             queue_to_master.put({'req': 'proc-complete', 'value': ret, 'log_filename': log_filename, 'error': error})
 
