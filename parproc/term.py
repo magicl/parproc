@@ -7,7 +7,8 @@ from collections import OrderedDict
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from rich.console import Console
+from rich.console import Console, Group
+from rich.control import Control
 from rich.live import Live
 from rich.markup import escape
 from rich.panel import Panel
@@ -20,6 +21,7 @@ from rich.progress import (
     TimeElapsedColumn,
 )
 from rich.syntax import Syntax
+from rich.text import Text
 
 from . import task_db
 from .state import FAILED_STATES, SUCCEEDED_STATES, ProcState
@@ -70,6 +72,21 @@ def _get_error_type_message(disp: Displayable) -> str:
     return " failed"
 
 
+def _format_completed_line_markup(disp: Displayable) -> str:
+    """Return markup string for one completed task line (for live area or print)."""
+    if disp.proc.state in SUCCEEDED_STATES:
+        status = "[bold green]✓[/bold green]"
+    elif disp.proc.state == ProcState.FAILED_DEP:
+        status = "[bold red]🚫[/bold red]"
+    else:
+        status = "[bold red]✗[/bold red]"
+    name_escaped = escape(disp.proc.name or "")
+    time_escaped = escape(disp.execution_time)
+    err_msg = _get_error_type_message(disp)
+    err_escaped = escape(err_msg)
+    return f"{status} {name_escaped}{time_escaped}{err_escaped}"
+
+
 # Base class for terminal display. Use TermSimple or TermDynamic.
 class Term:
 
@@ -92,6 +109,9 @@ class Term:
         self.progress = None
         self.active = OrderedDict()
         self.inactive = []
+
+    def cleanup_on_interrupt(self) -> None:
+        """Restore terminal state on SIGINT/SIGTERM (e.g. show cursor, stop Live). Override in TermDynamic."""
 
     def start_proc(self, p: "Proc") -> None:
         """Called when a process starts. Override in subclasses."""
@@ -127,21 +147,14 @@ class Term:
 
     def _print_completed_task(self, disp: Displayable) -> None:
         """Print a single completed task to the console (scrollback). Not part of the live update area."""
-        if disp.proc.state in SUCCEEDED_STATES:
-            status = "[bold green]✓[/bold green]"
-        elif disp.proc.state == ProcState.FAILED_DEP:
-            status = "[bold red]🚫[/bold red]"
-        else:
-            status = "[bold red]✗[/bold red]"
+        self.console.print(_format_completed_line_markup(disp))
+        self._print_completed_task_log_panels([disp])
 
-        name_escaped = escape(disp.proc.name or "")
-        time_escaped = escape(disp.execution_time)
-        err_msg = _get_error_type_message(disp)
-        err_escaped = escape(err_msg)
-        completion_line = f"{status} {name_escaped}{time_escaped}{err_escaped}"
-        self.console.print(completion_line)
-
-        if disp.chunks:
+    def _print_completed_task_log_panels(self, disps: list[Displayable]) -> None:
+        """Print log panels for displayables that have chunks (failed task output)."""
+        for disp in disps:
+            if not disp.chunks:
+                continue
             chunk_parts = []
             for i, chunk in enumerate(disp.chunks):
                 line_range = f"lines {chunk.start_line}-{chunk.end_line}"
@@ -160,7 +173,7 @@ class Term:
                 word_wrap=True,
             )
             panel_title = None
-            if disp.proc.state in FAILED_STATES and disp.proc.log_filename:
+            if disp.proc.log_filename:
                 abs_path = os.path.abspath(disp.proc.log_filename)
                 panel_title = f"[link=file://{abs_path}]{disp.proc.log_filename}[/link]"
             log_panel = Panel.fit(
@@ -367,15 +380,17 @@ class TermDynamic(Term):
             disp.execution_time = ""
         if self.progress is not None and disp.task_id is not None:
             self.progress.remove_task(disp.task_id)
-        self._print_completed_task(disp)
         self.inactive.append(disp)
         del self.active[p]
         if len(self.active) == 0:
+            # Last task: show only completed lines (no progress bar), then stop
+            self.progress = None
             if self.live is not None:
+                self.live.update(self._render_display())
                 self.live.stop()
                 self.live = None
+            self._print_completed_task_log_panels(self.inactive)
             self.inactive = []
-            self.progress = None
         else:
             if self.live is not None:
                 self.live.update(self._render_display())
@@ -427,7 +442,20 @@ class TermDynamic(Term):
                 self.live.start()
         return result
 
+    def cleanup_on_interrupt(self) -> None:
+        """Restore terminal state on SIGINT/SIGTERM: stop Live and show cursor."""
+        if self.live is not None:
+            self.live.stop()
+            self.live = None
+        self.console.print(Control.show_cursor(True))
+
     def _render_display(self) -> Any:
+        # Completed lines (inactive) + progress bar (active tasks) in one live area
+        parts: list[Any] = []
+        for disp in self.inactive:
+            parts.append(Text.from_markup(_format_completed_line_markup(disp)))
         if self.progress is not None:
-            return self.progress
-        return ""
+            parts.append(self.progress)
+        if not parts:
+            return ""
+        return Group(*parts)

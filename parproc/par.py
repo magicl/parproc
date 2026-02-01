@@ -86,6 +86,11 @@ def _install_signal_handlers() -> None:
                         p.process.terminate()
                     except OSError:
                         pass
+            # Restore terminal (cursor, stop Live) so shell is usable after Ctrl+C
+            try:
+                manager.term.cleanup_on_interrupt()
+            except Exception:  # pylint: disable=broad-except  # nosec B110
+                ...
         sys.stderr.write('Tasks Aborted\n')
         sys.stderr.flush()
         sys.exit(128 + signum)
