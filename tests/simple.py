@@ -217,3 +217,55 @@ class SimpleTest(TestCase):
 
         pp.wait('f')
         self.assertEqual(pp.results(), {'f0': 'ay', 'f1': 'ya', 'f': None})
+
+    def test_unpickleable_return_value(self):
+        """In multiprocess mode, a task that returns a non-pickleable value is detected and reported."""
+        if os.environ.get('PARPROC_TEST_MODE') == 'single':
+            self.skipTest('only relevant for multiprocess mode (return value is sent over a queue)')
+
+        pp.wait_clear()
+
+        @pp.Proc(name='unpickleable', now=True)
+        def unpickleable(context):
+            # Lambdas are not pickleable
+            return lambda x: x  # noqa: E731
+
+        pp.wait_for_all(exception_on_failure=False)
+
+        procs = pp.get_procs()
+        self.assertIn('unpickleable', procs)
+        p = procs['unpickleable']
+        self.assertEqual(p.error, pp.Proc.ERROR_NOT_PICKLEABLE)
+        self.assertIn('not pickleable', p.more_info)
+        self.assertIsNone(pp.results()['unpickleable'])
+
+    def test_pydantic_return_value(self):
+        """A task that returns a pydantic BaseModel has it converted to dict and returned in results."""
+        try:
+            from pydantic import BaseModel  # pylint: disable=import-outside-toplevel
+        except ImportError:
+            self.skipTest('pydantic not installed')
+
+        pp.wait_clear()
+
+        class ResultModel(BaseModel):
+            """Simple pydantic model for test."""
+
+            value: str
+            count: int = 0
+
+        @pp.Proc(name='pydantic_task', now=True)
+        def pydantic_task(context):
+            return ResultModel(value='ok', count=42)
+
+        pp.wait_for_all()
+
+        procs = pp.get_procs()
+        self.assertIn('pydantic_task', procs)
+        self.assertEqual(procs['pydantic_task'].error, pp.Proc.ERROR_NONE)
+        results_dict = pp.results()
+        self.assertIn('pydantic_task', results_dict)
+        # Should be converted to dict (pickleable), not the raw model
+        got = results_dict['pydantic_task']
+        self.assertIsInstance(got, dict)
+        self.assertEqual(got, {'value': 'ok', 'count': 42})

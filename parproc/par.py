@@ -11,14 +11,22 @@ import time
 import traceback
 import uuid
 from collections import OrderedDict
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from enum import Enum
 from typing import Any, Optional, TypeVar, Union
+
+BaseModel: type[Any] | None = None
+try:
+    from pydantic import BaseModel as _PydanticBaseModel
+
+    BaseModel = _PydanticBaseModel
+except ImportError:
+    pass
 
 from . import task_db
 from .runner import MultiProcessRunner, SingleProcessRunner
 from .state import FAILED_STATES, SUCCEEDED_STATES, ProcState
-from .term import Term
+from .term import TermDynamic, TermSimple
 
 # pylint: disable=too-many-positional-arguments
 
@@ -100,7 +108,7 @@ class ProcManager:  # pylint: disable=too-many-public-methods
         self.logger = logger
         self.pending_now: list[str] = []
         self.clear()
-        self.term = Term(dynamic=sys.stdout.isatty())
+        self.term = TermDynamic() if sys.stdout.isatty() else TermSimple()
 
         # Options are set in set_options. Defaults:
         self.parallel = 100
@@ -134,7 +142,7 @@ class ProcManager:  # pylint: disable=too-many-public-methods
 
         if getattr(self, 'debug', False):
             self.parallel = 1
-            self.term.dynamic = False
+            self.term = TermSimple()
         if getattr(self, 'mode', 'mp') == 'single':
             self.runner = SingleProcessRunner()
         else:
@@ -165,7 +173,7 @@ class ProcManager:  # pylint: disable=too-many-public-methods
         if parallel is not None:
             self.parallel = parallel
         if dynamic is not None:
-            self.term.dynamic = dynamic
+            self.term = TermDynamic() if dynamic else TermSimple()
         if mode is not None:
             if mode not in ('mp', 'single'):
                 raise UserError(f'mode must be "mp" or "single", got {mode!r}')
@@ -176,7 +184,7 @@ class ProcManager:  # pylint: disable=too-many-public-methods
             if debug:
                 self.mode = 'single'
                 self.parallel = 1
-                self.term.dynamic = False
+                self.term = TermSimple()
                 self.runner = SingleProcessRunner()
         if allow_missing_deps is not None:
             self.allow_missing_deps = allow_missing_deps
@@ -855,7 +863,7 @@ class ProcManager:  # pylint: disable=too-many-public-methods
     def sched_deps(self, proc):
         new_deps = False
         for d in proc.deps:
-            if d in self.procs:
+            if isinstance(d, str) and d in self.procs:
                 if self.procs[d].state == ProcState.IDLE:
                     # Resolve rdeps for this proc so it runs before procs that depend on it
                     self._inject_rdeps(d)
@@ -874,7 +882,8 @@ class ProcManager:  # pylint: disable=too-many-public-methods
                         f'Proc "{proc.name}" depends on "{d}" which does not exist. '
                         f'Set allow_missing_deps=True to allow missing dependencies.'
                     )
-                self.missing_deps[d] = True
+                if isinstance(d, str):
+                    self.missing_deps[d] = True
 
         return new_deps
 
@@ -897,15 +906,14 @@ class ProcManager:  # pylint: disable=too-many-public-methods
             if l in self.locks:
                 return False
         for d in proc.deps:
-            if not isinstance(d, str):
-                continue
-            if d not in self.procs or not self.procs[d].is_complete():
-                if d in self.procs and self.procs[d].is_failed():
-                    proc.state = ProcState.FAILED_DEP
-                    proc.error = Proc.ERROR_DEP_FAILED
-                    proc.more_info = f'dependency "{self.procs[d].name}" failed'
-                    self.term.completed_proc(proc)
-                return False
+            if isinstance(d, str):
+                if d not in self.procs or not self.procs[d].is_complete():
+                    if d in self.procs and self.procs[d].is_failed():
+                        proc.state = ProcState.FAILED_DEP
+                        proc.error = Proc.ERROR_DEP_FAILED
+                        proc.more_info = f'dependency "{self.procs[d].name}" failed'
+                        self.term.completed_proc(proc)
+                    return False
         # Check special dependencies (global conditions)
         for special_dep in proc.special_deps:
             if special_dep == SpecialDep.NO_FAILURES:
@@ -1155,13 +1163,20 @@ class ProcManager:  # pylint: disable=too-many-public-methods
             return msg
         raise UserError(f'unknown call: {msg["req"]}')
 
-    def complete_proc(self, p: 'Proc', output: Any, error: int, log_filename: str) -> None:
+    def complete_proc(
+        self, p: 'Proc', output: Any, error: int, log_filename: str, more_info: str | None = None
+    ) -> None:
         """Apply completion state (used by collect and SingleProcessRunner)."""
         p.process = None
+        # Convert pydantic models to dict for consistent results in single- and multi-process mode
+        if BaseModel is not None and isinstance(output, BaseModel):
+            output = output.model_dump()
         p.output = output
         p.error = error
         p.state = ProcState.SUCCEEDED if error == Proc.ERROR_NONE else ProcState.FAILED
         p.log_filename = log_filename
+        if more_info is not None:
+            p.more_info = more_info
         logger.info(f'proc "{p.name}" collected: ret = {p.output}')
         self.context['results'][p.name] = p.output
         logger.info(f'new context: {self.context}')
@@ -1234,6 +1249,12 @@ def run_task_with_redirect(
                 sys.stdout = sys.__stdout__
                 sys.stderr = sys.__stderr__
     return (ret, error, log_filename)
+
+
+def run_task(user_func: Callable[..., Any], pc: 'ProcContext', context: dict[str, Any]) -> tuple[Any, int, Any]:
+    """Run user task with redirect to log file. Returns (ret, error, exc_info)."""
+    ret, error, _log_filename = run_task_with_redirect(user_func, pc, context, redirect=True)
+    return (ret, error, None)
 
 
 # Objects of this class only live inside the individual proc threads
@@ -1324,7 +1345,7 @@ class Proto:
         self,
         name: str | None = None,
         f: F | None = None,
-        deps: list[DepInput] | list[DepInput | SpecialDep] | None = None,
+        deps: Sequence[DepInput | SpecialDep] | None = None,
         rdeps: list[str] | None = None,
         locks: list[str] | None = None,
         now: bool = False,
@@ -1334,13 +1355,13 @@ class Proto:
     ):
         # Input properties
         self.name = name
-        # Validate deps is a list (not a function or other type)
-        if deps is not None and not isinstance(deps, list):
+        # Validate deps is a sequence (not a function or other type)
+        if deps is not None and not isinstance(deps, (list, tuple)):
             raise UserError(
-                f'Proto deps must be a list, got {type(deps).__name__}. '
+                f'Proto deps must be a list or tuple, got {type(deps).__name__}. '
                 f'If you want to use a lambda dependency, wrap it in a list: deps=[lambda ...]'
             )
-        _deps = deps if deps is not None else []
+        _deps = list(deps) if deps is not None else []
         for d in _deps:
             if not isinstance(d, (str, SpecialDep)) and not callable(d):
                 raise UserError(
@@ -1471,6 +1492,7 @@ class Proc:
     ERROR_EXCEPTION = 1
     ERROR_DEP_FAILED = 2
     ERROR_TIMEOUT = 3
+    ERROR_NOT_PICKLEABLE = 4
 
     # Called on intitialization
     def __init__(
@@ -1547,9 +1569,35 @@ class Proc:
         def func(queue_to_proc: mp.Queue, queue_to_master: mp.Queue, context: dict[str, Any], name: str) -> None:
             logger.info(f'proc "{name}" started')
             pc = ProcContext(name, context, queue_to_proc, queue_to_master)
-            ret, error, log_filename = run_task_with_redirect(f, pc, context)
+            ret, error, _exc_info = run_task(f, pc, context)
+            log_filename = os.path.join(str(context['logdir']), name + '.log')
             logger.info(f'proc "{name}" ended: ret = {ret}')
-            queue_to_master.put({'req': 'proc-complete', 'value': ret, 'log_filename': log_filename, 'error': error})
+
+            # Convert pydantic models to dicts so they are pickleable
+            if BaseModel is not None and isinstance(ret, BaseModel):
+                ret = ret.model_dump()
+
+            import pickle as _pickle  # pylint: disable=import-outside-toplevel  # nosec: B403
+
+            msg = {'req': 'proc-complete', 'value': ret, 'log_filename': log_filename, 'error': error}
+            # multiprocessing.Queue.put() pickles in a background feeder thread, so pickle
+            # errors there are not raised to the caller (see bpo-40195). Pre-validate in this
+            # thread so we can catch PicklingError and send a fallback completion message.
+            try:
+                _pickle.dumps(msg)
+            except (TypeError, AttributeError, OSError, _pickle.PicklingError) as e:
+                err_msg = str(e) if isinstance(e, _pickle.PicklingError) else f'{type(e).__name__}: {e}'
+                msg = {
+                    'req': 'proc-complete',
+                    'value': None,
+                    'log_filename': log_filename,
+                    'error': Proc.ERROR_NOT_PICKLEABLE,
+                    'more_info': f'Return value is not pickleable: {err_msg}',
+                }
+            queue_to_master.put(msg)
+            # Ensure completion message is flushed before child exits (Queue uses a feeder thread)
+            queue_to_master.close()
+            queue_to_master.join_thread()
 
         if self.name is None:
             self.name = f.__name__

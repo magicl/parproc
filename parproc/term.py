@@ -5,7 +5,7 @@ import sys
 import time
 from collections import OrderedDict
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from rich.console import Console
 from rich.live import Live
@@ -52,18 +52,34 @@ class Displayable:
         return 1 + sum(chunk.end_line - chunk.start_line + 1 for chunk in self.chunks)
 
 
-# Manages terminal session.
+def _get_error_type_message(disp: Displayable) -> str:
+    """Short message for error type when task failed; empty when succeeded."""
+    if disp.proc.state in SUCCEEDED_STATES:
+        return ""
+    if disp.proc.state == ProcState.FAILED_DEP:
+        return " dependency failed"
+    # ProcState.FAILED with error code
+    proc_class = type(disp.proc)
+    err = getattr(disp.proc, "error", None)
+    if err == proc_class.ERROR_TIMEOUT:
+        return " timeout"
+    if err == proc_class.ERROR_EXCEPTION:
+        return " exception"
+    if err == getattr(proc_class, "ERROR_NOT_PICKLEABLE", -1):
+        return " not pickleable"
+    return " failed"
+
+
+# Base class for terminal display. Use TermSimple or TermDynamic.
 class Term:
 
     updatePeriod = 0.1  # Seconds between each update
     context_lines = 2  # Number of lines before and after keyword matches to include
 
-    def __init__(self, dynamic: bool = True):
-        # Keep track of active lines in terminal, i.e. lines we will go back and change
+    def __init__(self) -> None:
         self.active: OrderedDict["Proc", Displayable] = OrderedDict()
-        self.inactive: list[Displayable] = []  # Completed processes (printed to console when done, not in live area)
-        self.dynamic = dynamic  # True to dynamically update shell
-        self.last_update: float = 0.0  # To limit update rate
+        self.inactive: list[Displayable] = []
+        self.last_update: float = 0.0
         self.console = Console()
         self.progress: Progress | None = None
         self.live: Live | None = None
@@ -77,98 +93,114 @@ class Term:
         self.active = OrderedDict()
         self.inactive = []
 
-    def _ensure_progress(self) -> None:
-        """Initialize Progress and Live display if needed."""
-        if self.progress is None and self.dynamic:
-            self.progress = Progress(
-                SpinnerColumn(),
-                TextColumn("[progress.description]{task.description}"),
-                BarColumn(),
-                TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
-                TimeElapsedColumn(),
-                console=self.console,
-                transient=False,  # Keep completed tasks visible
-            )
-            self.live = Live(
-                self._render_display(),
-                refresh_per_second=10,
-                console=self.console,
-                vertical_overflow="visible",  # Let terminal scroll so all running tasks stay visible
-            )
-            self.live.start()
-
     def start_proc(self, p: "Proc") -> None:
-        disp = Displayable(p)
-        disp.start_time = time.time()
-        self.active[p] = disp
-
-        if not self.dynamic:
-            self._render_proc_static(disp)
-        else:
-            self._ensure_progress()
-            if self.progress is not None:
-                description = self._get_description(p)
-                expected = (
-                    task_db.get_expected_duration(p.name) if task_db.get_current() and p.name is not None else None
-                )
-                if expected is not None and expected > 0:
-                    disp.expected_duration = expected
-                    task_id = self.progress.add_task(description, total=expected)
-                else:
-                    disp.expected_duration = None
-                    task_id = self.progress.add_task(description, total=None)  # indeterminate
-                disp.task_id = task_id
-                # Update the display
-                if self.live is not None:
-                    self.live.update(self._render_display())
+        """Called when a process starts. Override in subclasses."""
+        raise NotImplementedError
 
     def end_proc(self, p: "Proc") -> None:
-        if p not in self.active:
-            return
+        """Called when a process ends. Override in subclasses."""
+        raise NotImplementedError
 
-        disp = self.active[p]
-        disp.completed = True
+    def _ensure_progress(self) -> None:
+        """Initialize Progress and Live display if needed. No-op in TermSimple."""
 
-        # Always analyze log if it exists (for both success and failure)
-        if disp.proc.log_filename != '':
-            with open(disp.proc.log_filename, encoding='utf-8') as f:
-                log_text = f.read()
-                task_failed = disp.proc.state in FAILED_STATES
-                disp.chunks = Term.extract_error_log(log_text, task_failed)
+    def update(self, force: bool = False) -> None:
+        """Refresh display. Override in subclasses."""
 
-        if not self.dynamic:
-            self._render_proc_static(disp)
-            del self.active[p]
+    def get_input(self, message: str, password: bool) -> str:
+        """Get input from user. Override in subclasses."""
+        self.console.print(message)
+        if password:
+            return getpass.getpass()
+        return sys.stdin.readline()
+
+    def _get_description(self, proc: "Proc") -> str:
+        """Get description text for a process."""
+        name = proc.name or ""
+        if proc.more_info:
+            name += f" - {proc.more_info}"
+        return name
+
+    def completed_proc(self, p: "Proc") -> None:
+        self.start_proc(p)
+        self.end_proc(p)
+
+    def _print_completed_task(self, disp: Displayable) -> None:
+        """Print a single completed task to the console (scrollback). Not part of the live update area."""
+        if disp.proc.state in SUCCEEDED_STATES:
+            status = "[bold green]✓[/bold green]"
+        elif disp.proc.state == ProcState.FAILED_DEP:
+            status = "[bold red]🚫[/bold red]"
         else:
-            # Calculate execution time
-            if disp.start_time is not None:
-                elapsed = time.time() - disp.start_time
-                disp.execution_time = f" ({elapsed:.2f}s)"
-            else:
-                disp.execution_time = ""
+            status = "[bold red]✗[/bold red]"
 
-            # Remove task from progress immediately
-            if self.progress is not None and disp.task_id is not None:
-                self.progress.remove_task(disp.task_id)
+        name_escaped = escape(disp.proc.name or "")
+        time_escaped = escape(disp.execution_time)
+        err_msg = _get_error_type_message(disp)
+        err_escaped = escape(err_msg)
+        completion_line = f"{status} {name_escaped}{time_escaped}{err_escaped}"
+        self.console.print(completion_line)
 
-            # Print completed task to console once (scrolls up; not part of live update area)
-            self._print_completed_task(disp)
+        if disp.chunks:
+            chunk_parts = []
+            for i, chunk in enumerate(disp.chunks):
+                line_range = f"lines {chunk.start_line}-{chunk.end_line}"
+                if i > 0:
+                    chunk_parts.append(f"\n--- {line_range} ---\n")
+                else:
+                    chunk_parts.append(f"--- {line_range} ---\n")
+                chunk_parts.append(chunk.content)
+            log_content_str = "".join(chunk_parts)
+            lexer = "python" if disp.proc.state in FAILED_STATES else "text"
+            log_content = Syntax(
+                log_content_str,
+                lexer=lexer,
+                theme="monokai",
+                line_numbers=False,
+                word_wrap=True,
+            )
+            panel_title = None
+            if disp.proc.state in FAILED_STATES and disp.proc.log_filename:
+                abs_path = os.path.abspath(disp.proc.log_filename)
+                panel_title = f"[link=file://{abs_path}]{disp.proc.log_filename}[/link]"
+            log_panel = Panel.fit(
+                log_content,
+                title=panel_title,
+                border_style="red" if disp.proc.state in FAILED_STATES else "dim",
+            )
+            self.console.print(log_panel)
 
-            # Move to inactive (for bookkeeping; no longer shown in live display)
-            self.inactive.append(disp)
-            del self.active[p]
+    def _render_display(self) -> Any:
+        """Render only the live-updated area. Override in TermDynamic."""
+        return ""
 
-            # If this was the last task, stop live display and clean up
-            if len(self.active) == 0:
-                if self.live is not None:
-                    self.live.stop()
-                    self.live = None
-                self.inactive = []
-                self.progress = None
-            else:
-                # Update live display to show completed task at top, with remaining progress below
-                if self.live is not None:
-                    self.live.update(self._render_display())
+    def _render_proc_static(self, disp: Displayable) -> None:
+        """Render a process in static (non-dynamic) mode."""
+        if disp.proc.state in SUCCEEDED_STATES:
+            status = "[bold green]✓[/bold green]"
+        elif disp.proc.state == ProcState.FAILED_DEP:
+            status = "[bold red]🚫[/bold red]"
+        elif disp.proc.state in FAILED_STATES:
+            status = "[bold red]✗[/bold red]"
+        else:
+            status = "[yellow]•[/yellow]"
+
+        more_info = disp.proc.more_info
+        if disp.proc.state in FAILED_STATES:
+            if more_info == '':
+                more_info = f'logfile: {disp.proc.log_filename}'
+
+        if more_info != '':
+            more_info = ' - ' + more_info
+
+        err_msg = _get_error_type_message(disp)
+        self.console.print(f'{status} {disp.proc.name}{more_info}{err_msg}')
+
+        if disp.chunks:
+            for chunk in disp.chunks:
+                self.console.print(f'  --- lines {chunk.start_line}-{chunk.end_line} ---')
+                for line in chunk.content.split('\n'):
+                    self.console.print(f'  {line}')
 
     @staticmethod
     def extract_error_log(text: str, task_failed: bool) -> list[LogChunk]:
@@ -254,26 +286,103 @@ class Term:
 
         return chunks
 
-    # Call to notify of proc e.g. being canceled. Will show up as completed with message depending
-    # on the state of the proc
-    def completed_proc(self, p: "Proc") -> None:
-        self.start_proc(p)
-        self.end_proc(p)
 
-    def _get_description(self, proc: "Proc") -> str:
-        """Get description text for a process."""
-        name = proc.name or ""
-        if proc.more_info:
-            name += f" - {proc.more_info}"
-        return name
+class TermSimple(Term):
+    """Static terminal display: one line per task, no live updates."""
 
-    # force: force update (e.g. when caller wants to refresh every 1/10 s)
+    def start_proc(self, p: "Proc") -> None:
+        disp = Displayable(p)
+        disp.start_time = time.time()
+        self.active[p] = disp
+        self._render_proc_static(disp)
+
+    def end_proc(self, p: "Proc") -> None:
+        if p not in self.active:
+            return
+        disp = self.active[p]
+        disp.completed = True
+        if disp.proc.log_filename != '':
+            with open(disp.proc.log_filename, encoding='utf-8') as f:
+                log_text = f.read()
+                task_failed = disp.proc.state in FAILED_STATES
+                disp.chunks = Term.extract_error_log(log_text, task_failed)
+        self._render_proc_static(disp)
+        del self.active[p]
+
+
+class TermDynamic(Term):
+    """Dynamic terminal display: live progress bars and in-place updates."""
+
+    def _ensure_progress(self) -> None:
+        if self.progress is None:
+            self.progress = Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                BarColumn(),
+                TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+                TimeElapsedColumn(),
+                console=self.console,
+                transient=False,
+            )
+            self.live = Live(
+                self._render_display(),
+                refresh_per_second=10,
+                console=self.console,
+                vertical_overflow="visible",
+            )
+            self.live.start()
+
+    def start_proc(self, p: "Proc") -> None:
+        disp = Displayable(p)
+        disp.start_time = time.time()
+        self.active[p] = disp
+        self._ensure_progress()
+        if self.progress is not None:
+            description = self._get_description(p)
+            expected = task_db.get_expected_duration(p.name) if task_db.get_current() and p.name is not None else None
+            if expected is not None and expected > 0:
+                disp.expected_duration = expected
+                task_id = self.progress.add_task(description, total=expected)
+            else:
+                disp.expected_duration = None
+                task_id = self.progress.add_task(description, total=None)
+            disp.task_id = task_id
+            if self.live is not None:
+                self.live.update(self._render_display())
+
+    def end_proc(self, p: "Proc") -> None:
+        if p not in self.active:
+            return
+        disp = self.active[p]
+        disp.completed = True
+        if disp.proc.log_filename != '':
+            with open(disp.proc.log_filename, encoding='utf-8') as f:
+                log_text = f.read()
+                task_failed = disp.proc.state in FAILED_STATES
+                disp.chunks = Term.extract_error_log(log_text, task_failed)
+        if disp.start_time is not None:
+            elapsed = time.time() - disp.start_time
+            disp.execution_time = f" ({elapsed:.2f}s)"
+        else:
+            disp.execution_time = ""
+        if self.progress is not None and disp.task_id is not None:
+            self.progress.remove_task(disp.task_id)
+        self._print_completed_task(disp)
+        self.inactive.append(disp)
+        del self.active[p]
+        if len(self.active) == 0:
+            if self.live is not None:
+                self.live.stop()
+                self.live = None
+            self.inactive = []
+            self.progress = None
+        else:
+            if self.live is not None:
+                self.live.update(self._render_display())
+
     def update(self, force: bool = False) -> None:
-        # Refresh task statuses at most every updatePeriod (0.1 s) unless force=True
-        if self.dynamic and (force or time.time() - self.last_update > Term.updatePeriod):
+        if force or time.time() - self.last_update > Term.updatePeriod:
             self.last_update = time.time()
-
-            # Update active tasks in progress
             if self.progress is not None:
                 for proc, disp in self.active.items():
                     if disp.task_id is not None and not disp.completed:
@@ -289,34 +398,23 @@ class Term:
                             )
                         else:
                             self.progress.update(disp.task_id, description=description, refresh=True)
-
             if self.live is not None:
                 self.live.update(self._render_display())
             elif len(self.active) > 0:
-                # Restart live if we have active processes but no live display
                 self._ensure_progress()
             elif len(self.active) == 0:
-                # Stop live display when no active processes remain
-                # Note: self.live is already None here (we would have taken the first branch otherwise)
                 self.progress = None
 
-        # self.console.flush()
-
     def get_input(self, message: str, password: bool) -> str:
-        # Temporarily stop live display if active
         if self.live is not None:
             self.live.stop()
             self.live = None
-            # Keep progress but stop live updates
-
         self.console.print(message)
         if password:
             result = getpass.getpass()
         else:
             result = sys.stdin.readline()
-
-        # Restart live display
-        if self.dynamic and len(self.active) > 0:
+        if len(self.active) > 0:
             if self.progress is None:
                 self._ensure_progress()
             else:
@@ -327,86 +425,9 @@ class Term:
                     vertical_overflow="visible",
                 )
                 self.live.start()
-
         return result
 
-    def _print_completed_task(self, disp: Displayable) -> None:
-        """Print a single completed task to the console (scrollback). Not part of the live update area."""
-        if disp.proc.state in SUCCEEDED_STATES:
-            status = "[bold green]✓[/bold green]"
-        elif disp.proc.state == ProcState.FAILED_DEP:
-            status = "[bold red]🚫[/bold red]"
-        else:
-            status = "[bold red]✗[/bold red]"
-
-        name_escaped = escape(disp.proc.name or "")
-        time_escaped = escape(disp.execution_time)
-        completion_line = f"{status} {name_escaped}{time_escaped}"
-        self.console.print(completion_line)
-
-        if disp.chunks:
-            chunk_parts = []
-            for i, chunk in enumerate(disp.chunks):
-                line_range = f"lines {chunk.start_line}-{chunk.end_line}"
-                if i > 0:
-                    chunk_parts.append(f"\n--- {line_range} ---\n")
-                else:
-                    chunk_parts.append(f"--- {line_range} ---\n")
-                chunk_parts.append(chunk.content)
-            log_content_str = "".join(chunk_parts)
-            lexer = "python" if disp.proc.state in FAILED_STATES else "text"
-            log_content = Syntax(
-                log_content_str,
-                lexer=lexer,
-                theme="monokai",
-                line_numbers=False,
-                word_wrap=True,
-            )
-            panel_title = None
-            if disp.proc.state in FAILED_STATES and disp.proc.log_filename:
-                abs_path = os.path.abspath(disp.proc.log_filename)
-                panel_title = f"[link=file://{abs_path}]{disp.proc.log_filename}[/link]"
-            log_panel = Panel.fit(
-                log_content,
-                title=panel_title,
-                border_style="red" if disp.proc.state in FAILED_STATES else "dim",
-            )
-            self.console.print(log_panel)
-
-    def _render_display(self):
-        """Render only the live-updated area: the progress bar(s) for running tasks.
-        Completed tasks are printed to the console once via _print_completed_task, so they
-        are not redrawn here (avoids flashing when the screen is full).
-        """
+    def _render_display(self) -> Any:
         if self.progress is not None:
             return self.progress
         return ""
-
-    def _render_proc_static(self, disp: Displayable) -> None:
-        """Render a process in static (non-dynamic) mode."""
-        if disp.proc.state in SUCCEEDED_STATES:
-            status = "[bold green]✓[/bold green]"
-        elif disp.proc.state == ProcState.FAILED_DEP:
-            status = "[bold red]🚫[/bold red]"
-        elif disp.proc.state in FAILED_STATES:
-            status = "[bold red]✗[/bold red]"
-        else:
-            status = "[yellow]•[/yellow]"
-
-        more_info = disp.proc.more_info
-        if disp.proc.state in FAILED_STATES:
-            if more_info == '':
-                more_info = f'logfile: {disp.proc.log_filename}'
-
-        if more_info != '':
-            more_info = ' - ' + more_info
-
-        self.console.print(f'{status} {disp.proc.name}{more_info}')
-
-        if disp.chunks:
-            for chunk in disp.chunks:
-                # Print line range header
-                self.console.print(f'  --- lines {chunk.start_line}-{chunk.end_line} ---')
-                # Print chunk content (may contain multiple lines)
-                for line in chunk.content.split('\n'):
-                    self.console.print(f'  {line}')

@@ -83,8 +83,9 @@ class MultiProcessRunner:
             else:
                 manager.logger.debug(f'got msg from proc "{name}": {msg}')
                 if msg['req'] == 'proc-complete':
-                    log_filename = manager.get_log_filename(name)
-                    manager.complete_proc(p, msg['value'], msg['error'], log_filename)
+                    log_filename = msg.get('log_filename') or manager.get_log_filename(name)
+                    more_info = msg.get('more_info')
+                    manager.complete_proc(p, msg['value'], msg['error'], log_filename, more_info=more_info)
                     found_any = True
                 elif msg['req'] in (
                     'get-input',
