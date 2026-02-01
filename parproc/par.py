@@ -453,7 +453,7 @@ class ProcManager:  # pylint: disable=too-many-public-methods
     # Schedules a proc for execution
     def start_proc(self, name: str) -> None:
         p = self.procs[name]
-
+        # No-op if already running, wanted, or complete; only start when IDLE
         if p.state == ProcState.IDLE:
             logger.debug(f'SCHED: "{p.name}"')
             p.state = ProcState.WANTED
@@ -783,21 +783,29 @@ class ProcManager:  # pylint: disable=too-many-public-methods
         """
         Create a proc from a proto.
 
-        The proto_name can be either:
+        If proto_name (or proc_name when provided) is already an existing proc name,
+        returns that name without creating from a proto (idempotent).
+
+        Otherwise, proto_name can be either:
         - An exact proto name pattern (e.g., "foo::[x]::[y]") - proc_name must be provided
         - A filled-out name (e.g., "foo::a::2") - automatically matches proto pattern "foo::[x]::[y]"
           and extracts x='a', y='2', then generates proc_name
 
         Args:
-            proto_name: Either proto pattern or filled-out name that matches a proto pattern
+            proto_name: Either existing proc name, proto pattern, or filled-out name
             proc_name: Optional explicit proc name (required if proto_name is a pattern)
 
         Returns:
-            The created proc name (either provided or generated)
+            The created or existing proc name
 
         Raises:
             UserError: If no matching proto found, or if multiple protos match, or if required args missing
         """
+        # If already an existing proc, return it (idempotent; no proto required)
+        if proto_name in self.procs:
+            return proto_name
+        if proc_name is not None and proc_name in self.procs:
+            return proc_name
         # Try to find matching proto (exact match or pattern match)
         match_result = self._find_matching_proto(proto_name)
         if match_result is None:

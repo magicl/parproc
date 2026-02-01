@@ -269,3 +269,33 @@ class SimpleTest(TestCase):
         got = results_dict['pydantic_task']
         self.assertIsInstance(got, dict)
         self.assertEqual(got, {'value': 'ok', 'count': 42})
+
+    def test_run_existing_proc(self):
+        """run(existing_proc_name) starts an already-registered proc without requiring a matching proto."""
+        pp.wait_clear()
+
+        @pp.Proc(name='run_existing')
+        def run_existing(context):
+            return 'ran'
+
+        # Proc is already in manager (from decorator). run() should just start it.
+        pp.run('run_existing')
+        pp.wait_for_all()
+
+        self.assertEqual(pp.results(), {'run_existing': 'ran'})
+
+    def test_start_and_run_already_wanted_or_running_noop(self):
+        """start() and run() on an already-wanted or already-running proc are no-ops (single completion)."""
+        pp.wait_clear()
+
+        @pp.Proc(name='noop_target')
+        def noop_target(context):
+            return 1
+
+        pp.start('noop_target')
+        pp.start('noop_target')  # No-op: already WANTED or RUNNING
+        pp.run('noop_target')  # No-op: create_proc returns name, start_proc sees non-IDLE
+        pp.wait_for_all()
+
+        # Proc ran once, not three times
+        self.assertEqual(pp.results(), {'noop_target': 1})
