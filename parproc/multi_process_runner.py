@@ -157,7 +157,9 @@ class MultiProcessRunner:
                 if msg['req'] == 'proc-complete':
                     _join_log_reader(p)
                     log_filename = manager.get_log_filename(name)
-                    manager.complete_proc(p, msg['value'], msg['error'], log_filename)
+                    manager.complete_proc(
+                        p, msg['value'], msg['error'], log_filename, msg.get('more_info')
+                    )
                     found_any = True
                 elif msg['req'] in (
                     'get-input',

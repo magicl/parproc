@@ -76,8 +76,8 @@ def _install_signal_handlers() -> None:
                 if p.is_running() and p.process is not None:
                     try:
                         p.process.terminate()
-                    except OSError:
-                        pass
+                    except (OSError, AttributeError):
+                        pass  # AttributeError if _popen is None (e.g. in child)
             if manager.term is not None:
                 manager.term.restore()
         sys.stderr.write('Tasks Aborted\n')
@@ -1155,13 +1155,22 @@ class ProcManager:  # pylint: disable=too-many-public-methods
             return msg
         raise UserError(f'unknown call: {msg["req"]}')
 
-    def complete_proc(self, p: 'Proc', output: Any, error: int, log_filename: str) -> None:
+    def complete_proc(
+        self,
+        p: 'Proc',
+        output: Any,
+        error: int,
+        log_filename: str,
+        more_info: str | None = None,
+    ) -> None:
         """Apply completion state (used by collect and SingleProcessRunner)."""
         p.process = None
         p.output = output
         p.error = error
         p.state = ProcState.SUCCEEDED if error == Proc.ERROR_NONE else ProcState.FAILED
         p.log_filename = log_filename
+        if more_info is not None:
+            p.more_info = more_info
         logger.info(f'proc "{p.name}" collected: ret = {p.output}')
         self.context['results'][p.name] = p.output
         logger.info(f'new context: {self.context}')
@@ -1441,6 +1450,7 @@ class Proc:
     ERROR_EXCEPTION = 1
     ERROR_DEP_FAILED = 2
     ERROR_TIMEOUT = 3
+    ERROR_NOT_PICKLEABLE = 4
 
     # Called on intitialization
     def __init__(
@@ -1520,7 +1530,27 @@ class Proc:
             ret, error, _exc_info = run_task(f, pc, context)
             log_filename = os.path.join(str(context['logdir']), name + '.log')
             logger.info(f'proc "{name}" ended: ret = {ret}')
-            queue_to_master.put({'req': 'proc-complete', 'value': ret, 'log_filename': log_filename, 'error': error})
+            import pickle as _pickle  # pylint: disable=import-outside-toplevel
+
+            msg = {'req': 'proc-complete', 'value': ret, 'log_filename': log_filename, 'error': error}
+            # multiprocessing.Queue.put() pickles in a background feeder thread, so pickle
+            # errors there are not raised to the caller (see bpo-40195). Pre-validate in this
+            # thread so we can catch PicklingError and send a fallback completion message.
+            try:
+                _pickle.dumps(msg)
+            except (TypeError, AttributeError, OSError, _pickle.PicklingError) as e:
+                err_msg = str(e) if isinstance(e, _pickle.PicklingError) else f'{type(e).__name__}: {e}'
+                msg = {
+                    'req': 'proc-complete',
+                    'value': None,
+                    'log_filename': log_filename,
+                    'error': Proc.ERROR_NOT_PICKLEABLE,
+                    'more_info': f'Return value is not pickleable: {err_msg}',
+                }
+            queue_to_master.put(msg)
+            # Ensure completion message is flushed before child exits (Queue uses a feeder thread)
+            queue_to_master.close()
+            queue_to_master.join_thread()
 
         if self.name is None:
             self.name = f.__name__

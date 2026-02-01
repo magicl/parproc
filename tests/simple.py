@@ -223,3 +223,24 @@ class SimpleTest(TestCase):
 
         pp.wait('f')
         self.assertEqual(pp.results(), {'f0': 'ay', 'f1': 'ya', 'f': None})
+
+    def test_unpickleable_return_value(self):
+        """In multiprocess mode, a task that returns a non-pickleable value is detected and reported."""
+        if os.environ.get('PARPROC_TEST_MODE') == 'single':
+            self.skipTest('only relevant for multiprocess mode (return value is sent over a queue)')
+
+        pp.wait_clear()
+
+        @pp.Proc(name='unpickleable', now=True)
+        def unpickleable(context):
+            # Lambdas are not pickleable
+            return lambda x: x  # noqa: E731
+
+        pp.wait_for_all(exception_on_failure=False)
+
+        procs = pp.get_procs()
+        self.assertIn('unpickleable', procs)
+        p = procs['unpickleable']
+        self.assertEqual(p.error, pp.Proc.ERROR_NOT_PICKLEABLE)
+        self.assertIn('not pickleable', p.more_info)
+        self.assertIsNone(pp.results()['unpickleable'])
