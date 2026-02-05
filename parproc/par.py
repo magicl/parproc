@@ -814,18 +814,65 @@ class ProcManager:  # pylint: disable=too-many-public-methods
             return False
         return '*' in value or '?' in value
 
+    def _resolve_arg_choices(
+        self,
+        proto: 'Proto',
+        request_name: str,
+        all_args: dict[str, Any],
+    ) -> dict[str, Sequence[Any]] | None:
+        """
+        Resolve proto.arg_choices to a dict. If arg_choices is a callable, call it with
+        DepProcContext and filtered args (same as dependency lambdas); it must return a dict.
+        """
+        if proto.arg_choices is None:
+            return None
+        if callable(proto.arg_choices):
+            dep_context = DepProcContext(
+                proc_name=request_name,
+                params=self.context['params'],
+                args=all_args,
+            )
+            sig = inspect.signature(proto.arg_choices)
+            param_names = list(sig.parameters.keys())
+            if not param_names:
+                result = proto.arg_choices()
+            else:
+                param_names = param_names[1:]  # first is context
+                filtered = {k: all_args[k] for k in param_names if k in all_args}
+                result = proto.arg_choices(dep_context, **filtered)
+            if not isinstance(result, dict):
+                raise UserError(
+                    f'arg_choices callable must return a dict, got {type(result).__name__}'
+                )
+            # Validate keys are subset of pattern params when we have them
+            if proto.regex_params:
+                pattern_params = set(proto.regex_params)
+                for key in result:
+                    if key not in pattern_params:
+                        raise UserError(
+                            f'arg_choices key "{key}" is not a parameter in pattern "{proto.name}". '
+                            f'Pattern parameters: {list(proto.regex_params)}'
+                        )
+            return result
+        return dict(proto.arg_choices)
+
     def _get_arg_choices(
         self,
         proto: 'Proto',
         param: str,
         request_name: str,
         all_args: dict[str, Any],
+        resolved_arg_choices: dict[str, Sequence[Any]] | None = None,
     ) -> list[Any]:
         """
         Resolve arg_choices for a param to a list. If the value is callable (lambda),
         call it with DepProcContext and filtered args (same as dependency lambdas).
         """
-        choices_val = proto.arg_choices[param]
+        if resolved_arg_choices is None:
+            resolved_arg_choices = self._resolve_arg_choices(proto, request_name, all_args)
+        if resolved_arg_choices is None:
+            raise UserError(f'No arg_choices for param "{param}"')
+        choices_val = resolved_arg_choices[param]
         if callable(choices_val):
             dep_context = DepProcContext(
                 proc_name=request_name,
@@ -851,19 +898,24 @@ class ProcManager:  # pylint: disable=too-many-public-methods
         extracted_args: dict[str, Any],
         request_name: str,
         all_args: dict[str, Any],
+        resolved_arg_choices: dict[str, Sequence[Any]] | None = None,
     ) -> list[dict[str, Any]]:
         """
         Expand glob patterns in extracted_args against proto.arg_choices.
         Returns a list of concrete arg dicts (one per combination).
         Raises UserError if a glob pattern matches no allowed value.
         """
+        if resolved_arg_choices is None:
+            resolved_arg_choices = self._resolve_arg_choices(proto, request_name, all_args)
         # For each param: either a single value (no glob) or list of choices matching the glob
         value_lists: list[list[Any]] = []
         for param in proto.regex_params:
             raw = extracted_args.get(param)
-            if param in proto.arg_choices and self._is_glob_value(raw):
+            if param in resolved_arg_choices and self._is_glob_value(raw):
                 pattern = str(raw)
-                choices = self._get_arg_choices(proto, param, request_name, all_args)
+                choices = self._get_arg_choices(
+                    proto, param, request_name, all_args, resolved_arg_choices
+                )
                 matched = [c for c in choices if fnmatch.fnmatch(str(c), pattern)]
                 if not matched:
                     raise UserError(
@@ -971,26 +1023,28 @@ class ProcManager:  # pylint: disable=too-many-public-methods
             all_args.update(proto.args)
         all_args.update(extracted_args)
 
+        resolved_arg_choices = self._resolve_arg_choices(proto, proto_name, all_args)
+
         # Check for glob in any extracted arg value
         has_glob = any(
             self._is_glob_value(extracted_args.get(p)) for p in proto.regex_params
         )
         if has_glob:
             # Glob is only allowed when arg_choices is set for each globbed param
-            if proto.arg_choices is None:
+            if resolved_arg_choices is None:
                 raise UserError(
                     'Glob patterns (* and ?) in argument values are only allowed when '
                     'the proto defines arg_choices for that argument.'
                 )
             for param in proto.regex_params:
                 val = extracted_args.get(param)
-                if self._is_glob_value(val) and param not in proto.arg_choices:
+                if self._is_glob_value(val) and param not in resolved_arg_choices:
                     raise UserError(
                         f'Glob pattern in argument "{param}" is only allowed when '
                         f'the proto defines arg_choices for that argument.'
                     )
             expanded_list = self._expand_glob_args(
-                proto, extracted_args, proto_name, all_args
+                proto, extracted_args, proto_name, all_args, resolved_arg_choices
             )
             names: list[str] = []
             for concrete_args in expanded_list:
@@ -1004,12 +1058,14 @@ class ProcManager:  # pylint: disable=too-many-public-methods
             return names
 
         # Single creation: validate literal values against arg_choices if set
-        if proto.arg_choices is not None:
-            for param in proto.arg_choices:
+        if resolved_arg_choices is not None:
+            for param in resolved_arg_choices:
                 if param not in extracted_args:
                     continue
                 val = extracted_args[param]
-                choices = self._get_arg_choices(proto, param, proto_name, all_args)
+                choices = self._get_arg_choices(
+                    proto, param, proto_name, all_args, resolved_arg_choices
+                )
                 allowed_strs = [str(c) for c in choices]
                 if str(val) not in allowed_strs:
                     raise UserError(
@@ -1519,10 +1575,11 @@ class Proto:
 
     Argument choices and glob expansion:
     - arg_choices: optional dict mapping argument name to a sequence of allowed values,
-      or a callable (lambda) that receives the same context as dependency lambdas:
-      DepProcContext (proc_name, params, args) plus filtered keyword args, and returns
-      a sequence (e.g. arg_choices={'env': ['dev', 'prod']} or {'env': lambda ctx: ['dev', 'prod']}).
-      Keys must be parameter names from the proto name pattern.
+      or a callable that returns such a dict. The callable is evaluated when creating
+      procs and receives the same context as dependency lambdas: DepProcContext
+      (proc_name, params, args) plus filtered keyword args, or no args if it takes none
+      (e.g. arg_choices={'env': ['dev', 'prod']} or arg_choices=lambda ctx: {'env': ['dev', 'prod']}).
+      Dict values may also be callables returning a sequence. Keys must be parameter names from the proto name pattern.
     - When arg_choices is set, creating a proc with a concrete value for that arg requires
       the value to be in the allowed set; otherwise UserError is raised.
     - When arg_choices is set, you can use glob patterns in a filled-out name: * and ?
@@ -1546,7 +1603,7 @@ class Proto:
         args: dict[str, Any] | None = None,
         timeout: float | None = None,
         wave: int = 0,
-        arg_choices: dict[str, Sequence[Any]] | None = None,
+        arg_choices: dict[str, Sequence[Any]] | Callable[..., dict[str, Sequence[Any]]] | None = None,
     ):
         # Input properties
         self.name = name
@@ -1569,7 +1626,12 @@ class Proto:
         self.args = args if args is not None else {}
         self.timeout = timeout
         self.wave = wave
-        self.arg_choices = dict(arg_choices) if arg_choices is not None else None
+        if arg_choices is None:
+            self.arg_choices: dict[str, Sequence[Any]] | Callable[..., dict[str, Sequence[Any]]] | None = None
+        elif callable(arg_choices):
+            self.arg_choices = arg_choices
+        else:
+            self.arg_choices = dict(arg_choices)
         # special_deps are stored inside deps; extracted when resolving
         self.special_deps: list[SpecialDep] = [d for d in _deps if isinstance(d, SpecialDep)]
 
@@ -1593,8 +1655,8 @@ class Proto:
         # Convert pattern like "foo::[x]::[y]" to regex that can match "foo::a::2" and extract x="a", y="2"
         self._build_regex_pattern()
 
-        # Validate arg_choices keys are subset of pattern params
-        if self.arg_choices is not None:
+        # Validate arg_choices keys are subset of pattern params (only when a dict; callable is validated when resolved)
+        if self.arg_choices is not None and not callable(self.arg_choices):
             pattern_params = set(self.regex_params)
             for key in self.arg_choices:
                 if key not in pattern_params:
