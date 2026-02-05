@@ -42,6 +42,26 @@ The ```now=True``` argument kicks off the jobs as soon as they are defined, whic
 pp.wait_for_all()
 ```
 
+## Argument choices and glob expansion
+
+Protos can define allowed values for arguments via `arg_choices`. When set, only those values are accepted when creating procs, and you can use glob patterns (`*`, `?`) in filled-out names to create multiple procs at once:
+
+```python
+@pp.Proto(name='build::[env]', arg_choices={'env': ['dev', 'prod']})
+def build(context: pp.ProcContext, env: str) -> str:
+    return f'built_{env}'
+
+# Create one proc
+pp.create('build::dev')
+
+# Create all matching procs: build::dev and build::prod
+names = pp.create('build::*')
+pp.start(*names)
+pp.wait(*names)
+```
+
+Using `*` or `?` in an argument when the proto has no `arg_choices` for that argument raises an error.
+
 
 # Contributing
 

@@ -104,7 +104,7 @@ class ProtoTest(TestCase):  # pylint: disable=too-many-public-methods
         pp.Proto('sleepy', lambda c: time.sleep(10), timeout=1, now=True)
 
         with self.assertRaises(pp.ProcessError):
-            pp.wait(pp.create('sleepy'))
+            pp.wait(*pp.create('sleepy'))
 
         # Test timeout within proc
         @pp.Proc(now=True)
@@ -141,8 +141,8 @@ class ProtoTest(TestCase):  # pylint: disable=too-many-public-methods
 
         # Create a proc from main_proto - this should automatically create dep_proto
         proc_name = pp.create('main_proto::test')
-        pp.start(proc_name)
-        pp.wait(proc_name)
+        pp.start(*proc_name)
+        pp.wait(*proc_name)
 
         # Verify both procs ran
         results = pp.results()
@@ -218,8 +218,8 @@ class ProtoTest(TestCase):  # pylint: disable=too-many-public-methods
         mixed_name = pp.create('mixed_deps::test')
         manager_name = pp.create('manager_context::test')
 
-        pp.start('base::fixed', 'base::test', 'helper::test', single_name, list_name, mixed_name, manager_name)
-        pp.wait('base::fixed', 'base::test', 'helper::test', single_name, list_name, mixed_name, manager_name)
+        pp.start('base::fixed', 'base::test', 'helper::test', *single_name, *list_name, *mixed_name, *manager_name)
+        pp.wait('base::fixed', 'base::test', 'helper::test', *single_name, *list_name, *mixed_name, *manager_name)
 
         results = pp.results()
 
@@ -250,8 +250,8 @@ class ProtoTest(TestCase):  # pylint: disable=too-many-public-methods
             return f'main_{value}_{dep_result}'
 
         proc_name = pp.create('main::test')
-        pp.start(proc_name)
-        pp.wait(proc_name)
+        pp.start(*proc_name)
+        pp.wait(*proc_name)
 
         results = pp.results()
         # Verify filled-out name was matched and proc created
@@ -296,8 +296,8 @@ class ProtoTest(TestCase):  # pylint: disable=too-many-public-methods
 
         # Create main proc with filled-out name - dep should get x and y from proto defaults
         proc_name = pp.create('main::A::B::100')
-        pp.start(proc_name)
-        pp.wait(proc_name)
+        pp.start(*proc_name)
+        pp.wait(*proc_name)
 
         results = pp.results()
         # Verify dep only got x and y (not a, b, c)
@@ -322,8 +322,8 @@ class ProtoTest(TestCase):  # pylint: disable=too-many-public-methods
 
         # Create main proc - dep should be created from filled-out name
         proc_name = pp.create('main::test')
-        pp.start(proc_name)
-        pp.wait(proc_name)
+        pp.start(*proc_name)
+        pp.wait(*proc_name)
 
         results = pp.results()
         # Verify dep was created from filled-out name
@@ -345,8 +345,8 @@ class ProtoTest(TestCase):  # pylint: disable=too-many-public-methods
             return f'main_{value}_{dep_result}'
 
         proc_name = pp.create('main::test')
-        pp.start(proc_name)
-        pp.wait(proc_name)
+        pp.start(*proc_name)
+        pp.wait(*proc_name)
 
         results = pp.results()
         self.assertEqual(results['dep::lambda_test::123'], 'dep_lambda_test_123')
@@ -380,8 +380,8 @@ class ProtoTest(TestCase):  # pylint: disable=too-many-public-methods
             return f'main_{value}_{dep1_result}_{dep2_result}'
 
         proc_name = pp.create('main-test')
-        pp.start(proc_name)
-        pp.wait(proc_name)
+        pp.start(*proc_name)
+        pp.wait(*proc_name)
 
         results = pp.results()
         self.assertEqual(results['dep1-from_lambda_test'], 'dep1_from_lambda_test')
@@ -421,8 +421,8 @@ class ProtoTest(TestCase):  # pylint: disable=too-many-public-methods
             return f'main_{value}_{str_result}_{tuple_result}_{lambda_result}'
 
         proc_name = pp.create('main::test')
-        pp.start(proc_name)
-        pp.wait(proc_name)
+        pp.start(*proc_name)
+        pp.wait(*proc_name)
 
         results = pp.results()
         self.assertEqual(results['str_dep::test'], 'str_test')
@@ -545,8 +545,8 @@ class ProtoTest(TestCase):  # pylint: disable=too-many-public-methods
 
         # Create using filled-out name - should extract task_id=123, status='done'
         proc_name = pp.create('task::123::done')
-        pp.start(proc_name)
-        pp.wait(proc_name)
+        pp.start(*proc_name)
+        pp.wait(*proc_name)
 
         results = pp.results()
         self.assertEqual(results['task::123::done'], 'task_123_done')
@@ -594,8 +594,8 @@ class ProtoTest(TestCase):  # pylint: disable=too-many-public-methods
             return int(result) + a
 
         # Create the proc - this should automatically create foo::3::2 as a dependency
-        proc_name = pp.create('test-partial-a::3')
-        self.assertEqual(proc_name, 'test-partial-a::3')
+        proc_names = pp.create('test-partial-a::3')
+        self.assertEqual(proc_names, ['test-partial-a::3'])
         # Verify the dependency was created
         self.assertIn('foo::3::2', pp.ProcManager.get_inst().procs)
 
@@ -623,8 +623,8 @@ class ProtoTest(TestCase):  # pylint: disable=too-many-public-methods
             return int(result) + b
 
         # Create the proc - this should automatically create foo::1::4 as a dependency
-        proc_name = pp.create('test-partial-b::4')
-        self.assertEqual(proc_name, 'test-partial-b::4')
+        proc_names = pp.create('test-partial-b::4')
+        self.assertEqual(proc_names, ['test-partial-b::4'])
         # Verify the dependency was created
         self.assertIn('foo::1::4', pp.ProcManager.get_inst().procs)
 
@@ -656,8 +656,8 @@ class ProtoTest(TestCase):  # pylint: disable=too-many-public-methods
             return int(result1) + int(result2)
 
         # Create the proc - this should automatically create foo::5::2 and foo::1::6 as dependencies
-        proc_name = pp.create('test-mixed::5::6')
-        self.assertEqual(proc_name, 'test-mixed::5::6')
+        proc_names = pp.create('test-mixed::5::6')
+        self.assertEqual(proc_names, ['test-mixed::5::6'])
         # Verify both dependencies were created
         self.assertIn('foo::5::2', pp.ProcManager.get_inst().procs)
         self.assertIn('foo::1::6', pp.ProcManager.get_inst().procs)
@@ -682,8 +682,8 @@ class ProtoTest(TestCase):  # pylint: disable=too-many-public-methods
 
         # Create using filled-out name - params extracted as strings, then cast to int/float
         proc_name = pp.create('calc::10::20.5')
-        pp.start(proc_name)
-        pp.wait(proc_name)
+        pp.start(*proc_name)
+        pp.wait(*proc_name)
 
         results = pp.results()
         self.assertEqual(results['calc::10::20.5'], 30.5)
@@ -722,8 +722,8 @@ class ProtoTest(TestCase):  # pylint: disable=too-many-public-methods
             return f'manager_{name}_{w1}_{w2}'
 
         proc_name = pp.create('manager::alice')
-        pp.start(proc_name)
-        pp.wait(proc_name)
+        pp.start(*proc_name)
+        pp.wait(*proc_name)
 
         results = pp.results()
         # Verify workers were created automatically
@@ -750,8 +750,8 @@ class ProtoTest(TestCase):  # pylint: disable=too-many-public-methods
             return f'main_{a}_{b}_{helper_result}'
 
         proc_name = pp.create('main::A::B')
-        pp.start(proc_name)
-        pp.wait(proc_name)
+        pp.start(*proc_name)
+        pp.wait(*proc_name)
 
         results = pp.results()
         # Verify helper only got x and y, not a, b, or z
@@ -767,16 +767,17 @@ class ProtoTest(TestCase):  # pylint: disable=too-many-public-methods
             return f'built_{cluster_name}'
 
         # Param "my-cluster" would be ambiguous with "-" separator; with "::" it works
-        proc_name = pp.create('k8s.build::my-cluster')
-        self.assertEqual(proc_name, 'k8s.build::my-cluster')
-        pp.start(proc_name)
-        pp.wait(proc_name)
+        proc_names = pp.create('k8s.build::my-cluster')
+        self.assertEqual(proc_names, ['k8s.build::my-cluster'])
+        pp.start(*proc_names)
+        pp.wait(*proc_names)
         results = pp.results()
         self.assertEqual(results['k8s.build::my-cluster'], 'built_my-cluster')
 
     def test_pattern_must_use_configured_separator(self):
         """Test that pattern with wrong separator between placeholders raises UserError"""
         pp.wait_clear()
+        pp.set_options(name_param_separator='::')  # ensure default so message mentions ::
 
         def bad_proto(context: pp.ProcContext, x: str, y: str) -> str:
             return f'{x}_{y}'
@@ -795,10 +796,10 @@ class ProtoTest(TestCase):  # pylint: disable=too-many-public-methods
         def bar_proc(context: pp.ProcContext, a: str, b: str) -> str:
             return f'{a}_{b}'
 
-        proc_name = pp.create('bar|one|two')
-        self.assertEqual(proc_name, 'bar|one|two')
-        pp.start(proc_name)
-        pp.wait(proc_name)
+        proc_names = pp.create('bar|one|two')
+        self.assertEqual(proc_names, ['bar|one|two'])
+        pp.start(*proc_names)
+        pp.wait(*proc_names)
         results = pp.results()
         self.assertEqual(results['bar|one|two'], 'one_two')
 
@@ -820,8 +821,8 @@ class ProtoTest(TestCase):  # pylint: disable=too-many-public-methods
 
         # Create and start B proc - setup should be injected as dependency
         proc_name = pp.create('B::test::2')
-        pp.start(proc_name)
-        pp.wait(proc_name)
+        pp.start(*proc_name)
+        pp.wait(*proc_name)
 
         results = pp.results()
         # Verify setup ran first (it's a dependency of B)
@@ -857,8 +858,8 @@ class ProtoTest(TestCase):  # pylint: disable=too-many-public-methods
             return f'B_{a}_{b}'
 
         proc_name = pp.create('B::something::2')
-        pp.start(proc_name)
-        pp.wait(proc_name)
+        pp.start(*proc_name)
+        pp.wait(*proc_name)
         results = pp.results()
         self.assertIn('setup1', results)  # B::[a]::[b] matches B::something::2
         self.assertNotIn('setup2', results)  # B::1::[b] doesn't match (1 != something)
@@ -889,8 +890,8 @@ class ProtoTest(TestCase):  # pylint: disable=too-many-public-methods
             return f'B_{a}_{b}'
 
         proc_name = pp.create('B::1::2')
-        pp.start(proc_name)
-        pp.wait(proc_name)
+        pp.start(*proc_name)
+        pp.wait(*proc_name)
         results = pp.results()
         self.assertIn('setup1_v2', results)
         self.assertIn('setup2_v2', results)
@@ -921,8 +922,8 @@ class ProtoTest(TestCase):  # pylint: disable=too-many-public-methods
             return f'B_{a}_{b}'
 
         proc_name = pp.create('B::1::3')
-        pp.start(proc_name)
-        pp.wait(proc_name)
+        pp.start(*proc_name)
+        pp.wait(*proc_name)
         results = pp.results()
         self.assertIn('setup1_v3', results)
         self.assertIn('setup2_v3', results)
@@ -945,8 +946,8 @@ class ProtoTest(TestCase):  # pylint: disable=too-many-public-methods
         # Create B proc - setup proto has rdep matching B, but setup proto pattern doesn't match B name
         # So setup won't be created automatically
         proc_name = pp.create('B::test::2')
-        pp.start(proc_name)
-        pp.wait(proc_name)
+        pp.start(*proc_name)
+        pp.wait(*proc_name)
         results = pp.results()
         # setup won't be created because B::test::2 doesn't match setup::[env] pattern
         self.assertNotIn('setup::test', results)
@@ -965,8 +966,8 @@ class ProtoTest(TestCase):  # pylint: disable=too-many-public-methods
 
         pp.create('setup::test')
         proc_name = pp.create('B::test::2')
-        pp.start(proc_name)
-        pp.wait(proc_name)
+        pp.start(*proc_name)
+        pp.wait(*proc_name)
         results = pp.results()
         # setup::test should be injected as dependency
         self.assertIn('setup::test', results)

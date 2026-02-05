@@ -29,8 +29,8 @@ class RdepTest(TestCase):
 
         # Create and start B proc - setup should be injected as dependency
         proc_name = pp.create('B::test::2')
-        pp.start(proc_name)
-        pp.wait(proc_name)
+        pp.start(*proc_name)
+        pp.wait(*proc_name)
 
         results = pp.results()
         # Verify setup ran first (it's a dependency of B)
@@ -55,8 +55,8 @@ class RdepTest(TestCase):
         # Create setup proc first, then start B - setup should be injected
         pp.create('setup::test')
         proc_name = pp.create('B::test::2')
-        pp.start(proc_name)
-        pp.wait(proc_name)
+        pp.start(*proc_name)
+        pp.wait(*proc_name)
 
         results = pp.results()
         # Verify setup ran first
@@ -83,8 +83,8 @@ class RdepTest(TestCase):
             return f'B_{a}_{b}'
 
         proc_name = pp.create('B::test::2')
-        pp.start(proc_name)
-        pp.wait(proc_name)
+        pp.start(*proc_name)
+        pp.wait(*proc_name)
 
         results = pp.results()
         # Both setups should be injected
@@ -165,8 +165,8 @@ class RdepTest(TestCase):
                 return f'B_{a}_{b}'
 
             proc_name = pp.create('B::test::2')
-            pp.start(proc_name)
-            pp.wait(proc_name)
+            pp.start(*proc_name)
+            pp.wait(*proc_name)
 
             # Copy to list for assertion (manager.list() is a proxy)
             order = list(execution_order)
@@ -198,8 +198,8 @@ class RdepTest(TestCase):
             return f'B_{a}_{b}_{a_result}'
 
         proc_name = pp.create('B::test::2')
-        pp.start(proc_name)
-        pp.wait(proc_name)
+        pp.start(*proc_name)
+        pp.wait(*proc_name)
 
         results = pp.results()
         # Both setup (rdep) and A::test (regular dep) should run before B
@@ -228,8 +228,8 @@ class RdepTest(TestCase):
 
         # Start k8s.build-image::stage::frontend - next.build::stage should be injected as dependency
         proc_name = pp.create('k8s.build-image::stage::frontend')
-        pp.start(proc_name)
-        pp.wait(proc_name)
+        pp.start(*proc_name)
+        pp.wait(*proc_name)
 
         results = pp.results()
         self.assertIn('next.build::stage', results)
@@ -265,8 +265,8 @@ class RdepTest(TestCase):
 
         # Start parent only - frontend is reached as dependency, not via start_proc
         proc_name = pp.create('k8s.build-images::stage')
-        pp.start(proc_name)
-        pp.wait(proc_name)
+        pp.start(*proc_name)
+        pp.wait(*proc_name)
 
         results = pp.results()
         self.assertIn('next.build::stage', results)
@@ -529,8 +529,8 @@ class RdepPatternMatchingTest(TestCase):
 
         # Test 1: B::something::2 should match B::[a]::[b] and B::[a]::2
         proc_name = pp.create('B::something::2')
-        pp.start(proc_name)
-        pp.wait(proc_name)
+        pp.start(*proc_name)
+        pp.wait(*proc_name)
         results = pp.results()
         self.assertIn('setup1', results)  # B::[a]::[b] matches
         self.assertNotIn('setup2', results)  # B::1::[b] doesn't match (1 != something)
@@ -561,8 +561,8 @@ class RdepPatternMatchingTest(TestCase):
             return f'B_{a}_{b}'
 
         proc_name = pp.create('B::1::2')
-        pp.start(proc_name)
-        pp.wait(proc_name)
+        pp.start(*proc_name)
+        pp.wait(*proc_name)
         results = pp.results()
         self.assertIn('setup1', results)  # B::[a]::[b] matches
         self.assertIn('setup2', results)  # B::1::[b] matches
@@ -593,8 +593,8 @@ class RdepPatternMatchingTest(TestCase):
             return f'B_{a}_{b}'
 
         proc_name = pp.create('B::1::3')
-        pp.start(proc_name)
-        pp.wait(proc_name)
+        pp.start(*proc_name)
+        pp.wait(*proc_name)
         results = pp.results()
         self.assertIn('setup1', results)  # B::[a]::[b] matches
         self.assertIn('setup2', results)  # B::1::[b] matches
