@@ -1243,7 +1243,9 @@ class ProcManager:  # pylint: disable=too-many-public-methods
         self.runner.collect(self)
 
     # Wait for all procs and locks
-    def wait_for_all(self, exception_on_failure: bool = True) -> None:
+    def wait_for_all(self, exception_on_failure: bool = True) -> bool:
+        """Wait for all procs and locks. Returns True if all succeeded, False if any failed.
+        If exception_on_failure is True, raises ProcessError on failure instead of returning False."""
         logger.debug('WAIT FOR COMPLETION')
         last_term_refresh = time.time()
         while (
@@ -1260,9 +1262,10 @@ class ProcManager:  # pylint: disable=too-many-public-methods
         # Do final update. Force update
         self.term.update(force=True)
 
-        # Raise on issue
-        if exception_on_failure and self.check_failure(list(self.procs)):
+        failed = self.check_failure(list(self.procs))
+        if exception_on_failure and failed:
             raise ProcessError('Process error [1]')
+        return not failed
 
     # Wait for procs or locks
     def wait(self, names: list[str] | list[str | list[str]]) -> None:
@@ -1878,7 +1881,9 @@ class Proc:
         return f
 
 
-def wait_for_all(exception_on_failure: bool = True) -> None:
+def wait_for_all(exception_on_failure: bool = True) -> bool:
+    """Wait for all procs and locks. Returns True if all succeeded, False if any failed.
+    If exception_on_failure is True, raises ProcessError on failure instead of returning False."""
     return ProcManager.get_inst().wait_for_all(exception_on_failure=exception_on_failure)
 
 
