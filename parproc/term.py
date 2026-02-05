@@ -150,38 +150,43 @@ class Term:
         self.console.print(_format_completed_line_markup(disp))
         self._print_completed_task_log_panels([disp])
 
+    def _log_panel_for_disp(self, disp: Displayable) -> Panel | None:
+        """Build the log panel renderable for a displayable that has chunks. Returns None if no chunks."""
+        if not disp.chunks:
+            return None
+        chunk_parts = []
+        for i, chunk in enumerate(disp.chunks):
+            line_range = f"lines {chunk.start_line}-{chunk.end_line}"
+            if i > 0:
+                chunk_parts.append(f"\n--- {line_range} ---\n")
+            else:
+                chunk_parts.append(f"--- {line_range} ---\n")
+            chunk_parts.append(chunk.content)
+        log_content_str = "".join(chunk_parts)
+        lexer = "python" if disp.proc.state in FAILED_STATES else "text"
+        log_content = Syntax(
+            log_content_str,
+            lexer=lexer,
+            theme="monokai",
+            line_numbers=False,
+            word_wrap=True,
+        )
+        panel_title = None
+        if disp.proc.log_filename:
+            abs_path = os.path.abspath(disp.proc.log_filename)
+            panel_title = f"[link=file://{abs_path}]{disp.proc.log_filename}[/link]"
+        return Panel.fit(
+            log_content,
+            title=panel_title,
+            border_style="red" if disp.proc.state in FAILED_STATES else "dim",
+        )
+
     def _print_completed_task_log_panels(self, disps: list[Displayable]) -> None:
         """Print log panels for displayables that have chunks (failed task output)."""
         for disp in disps:
-            if not disp.chunks:
-                continue
-            chunk_parts = []
-            for i, chunk in enumerate(disp.chunks):
-                line_range = f"lines {chunk.start_line}-{chunk.end_line}"
-                if i > 0:
-                    chunk_parts.append(f"\n--- {line_range} ---\n")
-                else:
-                    chunk_parts.append(f"--- {line_range} ---\n")
-                chunk_parts.append(chunk.content)
-            log_content_str = "".join(chunk_parts)
-            lexer = "python" if disp.proc.state in FAILED_STATES else "text"
-            log_content = Syntax(
-                log_content_str,
-                lexer=lexer,
-                theme="monokai",
-                line_numbers=False,
-                word_wrap=True,
-            )
-            panel_title = None
-            if disp.proc.log_filename:
-                abs_path = os.path.abspath(disp.proc.log_filename)
-                panel_title = f"[link=file://{abs_path}]{disp.proc.log_filename}[/link]"
-            log_panel = Panel.fit(
-                log_content,
-                title=panel_title,
-                border_style="red" if disp.proc.state in FAILED_STATES else "dim",
-            )
-            self.console.print(log_panel)
+            panel = self._log_panel_for_disp(disp)
+            if panel is not None:
+                self.console.print(panel)
 
     def _render_display(self) -> Any:
         """Render only the live-updated area. Override in TermDynamic."""
@@ -383,13 +388,12 @@ class TermDynamic(Term):
         self.inactive.append(disp)
         del self.active[p]
         if len(self.active) == 0:
-            # Last task: show only completed lines (no progress bar), then stop
+            # Last task: show completed lines and log panels (no progress bar), then stop
             self.progress = None
             if self.live is not None:
                 self.live.update(self._render_display())
                 self.live.stop()
                 self.live = None
-            self._print_completed_task_log_panels(self.inactive)
             self.inactive = []
         else:
             if self.live is not None:
@@ -452,10 +456,13 @@ class TermDynamic(Term):
         self.console.print(Control.show_cursor(True))
 
     def _render_display(self) -> Any:
-        # Completed lines (inactive) + progress bar (active tasks) in one live area
+        # Completed lines (inactive) + their log panels + progress bar (active tasks) in one live area
         parts: list[Any] = []
         for disp in self.inactive:
             parts.append(Text.from_markup(_format_completed_line_markup(disp)))
+            panel = self._log_panel_for_disp(disp)
+            if panel is not None:
+                parts.append(panel)
         if self.progress is not None:
             parts.append(self.progress)
         if not parts:
