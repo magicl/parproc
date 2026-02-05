@@ -1321,9 +1321,10 @@ class ProcManager:  # pylint: disable=too-many-public-methods
     # def getData(self):
     #    return {p.name: p.output for key, p in self.procs.items()}
 
-    def wait_clear(self, exception_on_failure: bool = False) -> None:
-        self.wait_for_all(exception_on_failure=exception_on_failure)
+    def wait_clear(self, exception_on_failure: bool = False) -> bool:
+        ret = self.wait_for_all(exception_on_failure=exception_on_failure)
         self.clear()
+        return ret
 
     def build_pc(
         self, proc: 'Proc', context: dict[str, Any], queue_to_proc: Any, queue_to_master: Any
