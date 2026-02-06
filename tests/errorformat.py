@@ -58,7 +58,9 @@ class ErrorFormatTest(TestCase):
   fooo
 """
 
-        chunks = Term.extract_error_log(error_msg, task_failed=True)
+        chunks = Term.extract_error_log(
+            error_msg, task_failed=True, include_stderr_full=True
+        )
         # Extract content from chunks and join
         output = '\n'.join(chunk.content for chunk in chunks)
         logging.info(output)

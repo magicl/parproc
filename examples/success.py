@@ -11,6 +11,10 @@ def define_procs():
     """Define all processes."""
 
     @pp.Proc(now=True)
+    def skipped_task(context):
+        raise pp.ProcSkippedError('Nothing to do for this run')
+
+    @pp.Proc(now=True)
     def func0(context):
         time.sleep(1)
 

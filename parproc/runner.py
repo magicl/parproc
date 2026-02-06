@@ -8,7 +8,7 @@ import time
 from collections.abc import Callable
 from typing import Any, Protocol
 
-from .state import ProcState
+from .types import ProcState
 
 # Avoid circular import: runner is used by par. Runners only call methods on the manager.
 

@@ -26,9 +26,20 @@ except ImportError:
     pass
 
 from . import task_db
+from .proc import Proc, ProcContext
 from .runner import MultiProcessRunner, SingleProcessRunner
-from .state import FAILED_STATES, SUCCEEDED_STATES, ProcState
 from .term import TermDynamic, TermSimple
+from .types import (
+    FAILED_STATES,
+    NO_FAILURES,
+    SUCCEEDED_STATES,
+    ProcFailedError,
+    ProcSkippedError,
+    ProcessError,
+    ProcState,
+    SpecialDep,
+    UserError,
+)
 
 # pylint: disable=too-many-positional-arguments
 
@@ -46,25 +57,6 @@ DepInput = Union[str, Callable[..., DepSpecOrList]]
 # Default separator between proto name and params (and between params). The actual value is
 # the ProcManager option name_param_separator (set via set_options); this constant is the default.
 NAME_PARAM_SEP = '::'
-
-
-class SpecialDep(Enum):
-    """Special dependency kinds: global conditions that are not other tasks."""
-
-    NO_FAILURES = 'no_failures'  # Satisfied only when no proc in the run has failed
-
-
-# Individual special deps exported on parproc (e.g. pp.NO_FAILURES)
-NO_FAILURES = SpecialDep.NO_FAILURES
-
-
-class UserError(Exception):
-    pass
-
-
-class ProcessError(Exception):
-    pass
-
 
 logger = logging.getLogger('par')
 
@@ -1459,9 +1451,16 @@ def run_task_with_redirect(
         try:
             try:
                 ret = user_func(pc, **pc.args)
+            except ProcSkippedError as e:
+                #Ignore exception info
+                error = Proc.ERROR_SKIPPED
+            except ProcFailedError as e:
+                #Ignore exception info
+                error = Proc.ERROR_FAILED
             except Exception as e:  # pylint: disable=broad-exception-caught
                 _, _, tb = sys.exc_info()
                 info = str(e) + '\n' + ''.join(traceback.format_tb(tb))
+                # Only append STDERR_FULL for generic exceptions (ERROR_EXCEPTION)
                 stderr = getattr(e, 'stderr', None)
                 if stderr is not None and isinstance(stderr, bytes):
                     info += f'\nSTDERR_FULL:\n{stderr.decode("utf-8")}'
@@ -1487,59 +1486,6 @@ def run_task(user_func: Callable[..., Any], pc: 'ProcContext', context: dict[str
     """Run user task with redirect to log file. Returns (ret, error, exc_info)."""
     ret, error, _log_filename = run_task_with_redirect(user_func, pc, context, redirect=True)
     return (ret, error, None)
-
-
-# Objects of this class only live inside the individual proc threads
-class ProcContext:
-
-    def __init__(self, proc_name: str, context: dict[str, Any], queue_to_proc: Any, queue_to_master: Any):
-        self.proc_name = proc_name
-        self.results = context['results']
-        self.params = context['params']
-        self.args = context['args']
-        self.queue_to_proc = queue_to_proc
-        self.queue_to_master = queue_to_master
-
-    def _cmd(self, **kwargs: Any) -> Any:
-        # Pass request to master
-        self.queue_to_master.put(kwargs)
-        # Get and return response
-        logger.debug(f'ProcContext request to master: {kwargs}')
-        resp = self.queue_to_proc.get()
-        logger.debug(f'ProcContext response from master: {resp}')
-        return resp
-
-    def get_input(self, message='', password=False):
-        return self._cmd(req='get-input', message=message, password=password)['resp']
-
-    def create(self, proto_name: str, proc_name: str | None = None) -> list[str]:
-        resp = self._cmd(req='create-proc', proto_name=proto_name, proc_name=proc_name)
-        return list(resp['proc_names'])
-
-    def run(self, proto_name: str, proc_name: str | None = None) -> None:
-        """Create and start a proc (single round-trip run-proc command)."""
-        self._cmd(req='run-proc', proto_name=proto_name, proc_name=proc_name)
-
-    def start(self, *names: str) -> None:
-        if names:
-            self._cmd(req='start-procs', names=list(names))
-
-    def wait(self, *names: str) -> None:
-        # Periodically poll for completion
-        logger.info('waiting to wait')
-        while True:
-            res = self._cmd(req='check-complete', names=list(names))
-            if res['failure']:
-                raise ProcessError('Process error [3]')
-            if res['complete']:
-                break
-            logger.info('waiting for sub-proc')
-            time.sleep(0.01)
-
-        # At this point, everything is complete
-        logger.info(f'wait done. results pre: {self.results}')
-        self.results.update(self._cmd(req='get-results', names=list(names))['results'])
-        logger.info(f'wait done. results post: {self.results}')
 
 
 class DepProcContext:
@@ -1752,136 +1698,6 @@ class Proto:
         return extracted
 
 
-class Proc:
-    """
-    Decorator for processes
-    name   - identified name of process
-    deps   - process dependencies (proc names and/or SpecialDep). will not be run until these are satisfied
-    locks  - list of locks. only one process can own a lock at any given time
-    """
-
-    ERROR_NONE = 0
-    ERROR_EXCEPTION = 1
-    ERROR_DEP_FAILED = 2
-    ERROR_TIMEOUT = 3
-    ERROR_NOT_PICKLEABLE = 4
-
-    # Called on intitialization
-    def __init__(
-        self,
-        name: str | None = None,
-        f: F | None = None,
-        *,
-        deps: list[str] | list[str | SpecialDep] | None = None,
-        rdeps: list[str] | None = None,
-        locks: list[str] | None = None,
-        now: bool = False,
-        args: dict[str, Any] | None = None,
-        proto: Proto | None = None,
-        timeout: float | None = None,
-        wave: int = 0,
-        special_deps: list[SpecialDep] | None = None,
-    ):
-        # special_deps is only set when creating from a proto; user puts special deps in deps array
-        # Input properties
-        self.name = name
-        self.rdeps = rdeps if rdeps is not None else []
-        self.locks = locks if locks is not None else []
-        self.now = now
-        self.args = args if args is not None else {}
-        self.proto = proto
-        self.timeout = timeout
-        # Wave defaults to proto's wave if proto exists, otherwise use provided wave (default 0)
-        self.wave = proto.wave if proto is not None else wave
-        if special_deps is not None:
-            self.deps = deps if deps is not None else []
-            self.special_deps = special_deps
-        else:
-            _deps = deps if deps is not None else []
-            self.deps = [d for d in _deps if isinstance(d, str)]
-            self.special_deps = [d for d in _deps if isinstance(d, SpecialDep)]
-            for d in _deps:
-                if not isinstance(d, (str, SpecialDep)):
-                    raise UserError(f'Proc deps must contain str or SpecialDep values, got {type(d).__name__!r}.')
-
-        # Utils
-        self.log_filename = ''
-        self.run_id = str(uuid.uuid4())  # Unique id for this run; used by task DB to match start/end
-
-        # Main function (wrapper for multiprocessing); user_func is the raw decorated callable
-        self.func: Any | None = None
-        self.user_func: Any | None = None
-
-        # State
-        self.start_time: float | None = None
-        self.end_time: float | None = None
-        self.process: mp.Process | None = None
-        self.queue_to_proc: mp.Queue | None = None
-        self.queue_to_master: mp.Queue | None = None
-        self.state = ProcState.IDLE
-        self.error = Proc.ERROR_NONE
-        self.more_info = ''
-        self.output: Any | None = None
-
-        if f is not None:
-            # Created using short-hand
-            self.__call__(f)
-
-    def is_running(self) -> bool:
-        return self.state == ProcState.RUNNING
-
-    def is_complete(self) -> bool:
-        return self.state in SUCCEEDED_STATES or self.state in FAILED_STATES
-
-    def is_failed(self) -> bool:
-        return self.state in FAILED_STATES
-
-    # Called immediately after initialization
-    def __call__(self, f: F) -> F:
-        def func(queue_to_proc: mp.Queue, queue_to_master: mp.Queue, context: dict[str, Any], name: str) -> None:
-            logger.info(f'proc "{name}" started')
-            pc = ProcContext(name, context, queue_to_proc, queue_to_master)
-            ret, error, _exc_info = run_task(f, pc, context)
-            log_filename = os.path.join(str(context['logdir']), name + '.log')
-            logger.info(f'proc "{name}" ended: ret = {ret}')
-
-            # Convert pydantic models to dicts so they are pickleable
-            if BaseModel is not None and isinstance(ret, BaseModel):
-                ret = ret.model_dump()
-
-            import pickle as _pickle  # pylint: disable=import-outside-toplevel  # nosec: B403
-
-            msg = {'req': 'proc-complete', 'value': ret, 'log_filename': log_filename, 'error': error}
-            # multiprocessing.Queue.put() pickles in a background feeder thread, so pickle
-            # errors there are not raised to the caller (see bpo-40195). Pre-validate in this
-            # thread so we can catch PicklingError and send a fallback completion message.
-            try:
-                _pickle.dumps(msg)
-            except (TypeError, AttributeError, OSError, _pickle.PicklingError) as e:
-                err_msg = str(e) if isinstance(e, _pickle.PicklingError) else f'{type(e).__name__}: {e}'
-                msg = {
-                    'req': 'proc-complete',
-                    'value': None,
-                    'log_filename': log_filename,
-                    'error': Proc.ERROR_NOT_PICKLEABLE,
-                    'more_info': f'Return value is not pickleable: {err_msg}',
-                }
-            queue_to_master.put(msg)
-            # Ensure completion message is flushed before child exits (Queue uses a feeder thread)
-            queue_to_master.close()
-            queue_to_master.join_thread()
-
-        if self.name is None:
-            self.name = f.__name__
-
-        self.user_func = f
-        self.func = func
-        ProcManager.get_inst().add_proc(self)
-
-        # Return the original function to preserve type information
-        return f
-
-
 def wait_for_all(exception_on_failure: bool = True) -> bool:
     """Wait for all procs and locks. Returns True if all succeeded, False if any failed.
     If exception_on_failure is True, raises ProcessError on failure instead of returning False."""
@@ -1955,3 +1771,9 @@ def get_protos() -> dict[str, Proto]:
 # Wait for given proc or lock names
 def wait(*names: str) -> None:
     return ProcManager.get_inst().wait(list(names))
+
+
+# So proc.Proc can call back into par without proc importing par (avoids circular import)
+from . import proc as _proc_module
+_proc_module.register_manager_getter(lambda: ProcManager.get_inst())
+_proc_module.register_run_task(run_task)

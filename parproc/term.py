@@ -24,7 +24,8 @@ from rich.syntax import Syntax
 from rich.text import Text
 
 from . import task_db
-from .state import FAILED_STATES, SUCCEEDED_STATES, ProcState
+from .proc import Proc
+from .types import FAILED_STATES, ProcState, SUCCEEDED_STATES
 
 if TYPE_CHECKING:
     from .par import Proc
@@ -61,13 +62,16 @@ def _get_error_type_message(disp: Displayable) -> str:
     if disp.proc.state == ProcState.FAILED_DEP:
         return " dependency failed"
     # ProcState.FAILED with error code
-    proc_class = type(disp.proc)
     err = getattr(disp.proc, "error", None)
-    if err == proc_class.ERROR_TIMEOUT:
+    if err == Proc.ERROR_TIMEOUT:
         return " timeout"
-    if err == proc_class.ERROR_EXCEPTION:
+    if err == Proc.ERROR_EXCEPTION:
         return " exception"
-    if err == getattr(proc_class, "ERROR_NOT_PICKLEABLE", -1):
+    if err == Proc.ERROR_FAILED:
+        return " failed"
+    if err == Proc.ERROR_SKIPPED:
+        return " skipped"
+    if err == Proc.ERROR_NOT_PICKLEABLE:
         return " not pickleable"
     return " failed"
 
@@ -78,6 +82,8 @@ def _format_completed_line_markup(disp: Displayable) -> str:
         status = "[bold green]✓[/bold green]"
     elif disp.proc.state == ProcState.FAILED_DEP:
         status = "[bold red]🚫[/bold red]"
+    elif getattr(disp.proc, "error", None) == Proc.ERROR_SKIPPED:
+        status = "[bold yellow]⊘[/bold yellow]"  # skipped
     else:
         status = "[bold red]✗[/bold red]"
     name_escaped = escape(disp.proc.name or "")
@@ -182,8 +188,10 @@ class Term:
         )
 
     def _print_completed_task_log_panels(self, disps: list[Displayable]) -> None:
-        """Print log panels for displayables that have chunks (failed task output)."""
+        """Print log panels for displayables that have chunks (failed task output). Skipped tasks get no panel."""
         for disp in disps:
+            if getattr(disp.proc, 'error', None) == Proc.ERROR_SKIPPED:
+                continue
             panel = self._log_panel_for_disp(disp)
             if panel is not None:
                 self.console.print(panel)
@@ -198,6 +206,8 @@ class Term:
             status = "[bold green]✓[/bold green]"
         elif disp.proc.state == ProcState.FAILED_DEP:
             status = "[bold red]🚫[/bold red]"
+        elif getattr(disp.proc, "error", None) == Proc.ERROR_SKIPPED:
+            status = "[bold yellow]⊘[/bold yellow]"
         elif disp.proc.state in FAILED_STATES:
             status = "[bold red]✗[/bold red]"
         else:
@@ -322,8 +332,11 @@ class TermSimple(Term):
         if disp.proc.log_filename != '':
             with open(disp.proc.log_filename, encoding='utf-8') as f:
                 log_text = f.read()
-                task_failed = disp.proc.state in FAILED_STATES
+            task_failed = disp.proc.state in FAILED_STATES
+            if task_failed and getattr(disp.proc, 'error', None) != Proc.ERROR_SKIPPED:
                 disp.chunks = Term.extract_error_log(log_text, task_failed)
+            else:
+                disp.chunks = []
         self._render_proc_static(disp)
         del self.active[p]
 
@@ -376,8 +389,11 @@ class TermDynamic(Term):
         if disp.proc.log_filename != '':
             with open(disp.proc.log_filename, encoding='utf-8') as f:
                 log_text = f.read()
-                task_failed = disp.proc.state in FAILED_STATES
+            task_failed = disp.proc.state in FAILED_STATES
+            if task_failed and getattr(disp.proc, 'error', None) != Proc.ERROR_SKIPPED:
                 disp.chunks = Term.extract_error_log(log_text, task_failed)
+            else:
+                disp.chunks = []
         if disp.start_time is not None:
             elapsed = time.time() - disp.start_time
             disp.execution_time = f" ({elapsed:.2f}s)"
