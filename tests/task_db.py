@@ -4,6 +4,7 @@ import os
 import sqlite3
 import tempfile
 import time
+from typing import cast
 from unittest import TestCase
 
 import parproc as pp
@@ -33,9 +34,7 @@ class TaskDBTest(TestCase):
 
             conn = sqlite3.connect(path)
             try:
-                rows = conn.execute(
-                    'SELECT task_name, started_at, ended_at, status FROM runs'
-                ).fetchall()
+                rows = conn.execute('SELECT task_name, started_at, ended_at, status FROM runs').fetchall()
                 conn.close()
             except Exception:
                 conn.close()
@@ -52,6 +51,8 @@ class TaskDBTest(TestCase):
 
             eta = get_expected_duration('proc_a')
             self.assertIsInstance(eta, float)
+            self.assertIsNotNone(eta)
+            eta = cast(float, eta)
             self.assertGreater(eta, 0)
         finally:
             try:
@@ -115,6 +116,8 @@ class TaskDBTest(TestCase):
             # weighted avg = (0.05*1 + 0.15*0.8) / (1 + 0.8) ≈ 0.094
             eta = get_expected_duration('slow_first', window=10, decay=0.8)
             self.assertIsInstance(eta, float)
+            self.assertIsNotNone(eta)
+            eta = cast(float, eta)
             self.assertGreater(eta, 0.03)
             self.assertLess(eta, 0.2)
             # Should be closer to 0.05 than to 0.15

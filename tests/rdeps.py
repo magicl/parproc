@@ -111,8 +111,8 @@ class RdepTest(TestCase):
 
         # Start B - setup should be injected
         proc_name_b = pp.create('B::test::2')
-        pp.start(proc_name_b)
-        pp.wait(proc_name_b)
+        pp.start(*proc_name_b)
+        pp.wait(*proc_name_b)
 
         results = pp.results()
         self.assertIn('setup', results)
@@ -134,8 +134,8 @@ class RdepTest(TestCase):
             return f'C_{x}_{y}'
 
         proc_name_c = pp.create('C::foo::42')
-        pp.start(proc_name_c)
-        pp.wait(proc_name_c)
+        pp.start(*proc_name_c)
+        pp.wait(*proc_name_c)
 
         results = pp.results()
         self.assertIn('setup', results)

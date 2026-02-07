@@ -1694,8 +1694,8 @@ def set_params(**params: Any) -> None:
 
 
 # Waits for any previous job to complete, then clears state
-def wait_clear(exception_on_failure: bool = False) -> None:
-    ProcManager.get_inst().wait_clear(exception_on_failure=exception_on_failure)
+def wait_clear(exception_on_failure: bool = False) -> bool:
+    return ProcManager.get_inst().wait_clear(exception_on_failure=exception_on_failure)
 
 
 def clear() -> None:

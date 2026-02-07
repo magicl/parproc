@@ -80,7 +80,7 @@ class ProtoTest(TestCase):  # pylint: disable=too-many-public-methods
         self.assertEqual(pp.results(), {'f1': 10})
 
         # Kick off a couple f0s. Starts immediately on creation due to 'now' setting
-        pp.wait(*[pp.create('f0::1::2'), pp.create('f0::3::4')])
+        pp.wait(*pp.create('f0::1::2'), *pp.create('f0::3::4'))
 
         self.assertEqual(pp.results(), {'f1': 10, 'f0::1::2': 2, 'f0::3::4': 12})
 
