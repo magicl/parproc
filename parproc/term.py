@@ -5,7 +5,7 @@ import sys
 import time
 from collections import OrderedDict
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from rich.console import Console, Group
 from rich.control import Control
@@ -25,10 +25,7 @@ from rich.text import Text
 
 from . import task_db
 from .proc import Proc
-from .types import FAILED_STATES, ProcState, SUCCEEDED_STATES
-
-if TYPE_CHECKING:
-    from .par import Proc
+from .types import FAILED_STATES, SUCCEEDED_STATES, ProcState
 
 
 @dataclass
@@ -41,7 +38,7 @@ class LogChunk:
 
 
 class Displayable:
-    def __init__(self, proc: "Proc"):
+    def __init__(self, proc: Proc):
         self.proc = proc
         self.chunks: list[LogChunk] = []  # Log chunks to display for proc
         self.completed = False
@@ -96,10 +93,15 @@ def _format_completed_line_markup(disp: Displayable) -> str:
     else:
         status = "[bold red]✗[/bold red]"
     name_escaped = escape(disp.proc.name or "")
+    if disp.proc.log_filename:
+        abs_path = os.path.abspath(disp.proc.log_filename)
+        name_part = f"[link=file://{abs_path}]{name_escaped}[/link]"
+    else:
+        name_part = name_escaped
     time_escaped = escape(disp.execution_time)
     err_msg = _get_error_type_message(disp)
     err_escaped = escape(err_msg)
-    return f"{status} {name_escaped}{time_escaped}{err_escaped}"
+    return f"{status} {name_part}{time_escaped}{err_escaped}"
 
 
 # Base class for terminal display. Use TermSimple or TermDynamic.
@@ -109,7 +111,7 @@ class Term:
     context_lines = 2  # Number of lines before and after keyword matches to include
 
     def __init__(self) -> None:
-        self.active: OrderedDict["Proc", Displayable] = OrderedDict()
+        self.active: OrderedDict[Proc, Displayable] = OrderedDict()
         self.inactive: list[Displayable] = []
         self.last_update: float = 0.0
         self.console = Console()
@@ -128,11 +130,11 @@ class Term:
     def cleanup_on_interrupt(self) -> None:
         """Restore terminal state on SIGINT/SIGTERM (e.g. show cursor, stop Live). Override in TermDynamic."""
 
-    def start_proc(self, p: "Proc") -> None:
+    def start_proc(self, p: Proc) -> None:
         """Called when a process starts. Override in subclasses."""
         raise NotImplementedError
 
-    def end_proc(self, p: "Proc") -> None:
+    def end_proc(self, p: Proc) -> None:
         """Called when a process ends. Override in subclasses."""
         raise NotImplementedError
 
@@ -149,14 +151,14 @@ class Term:
             return getpass.getpass()
         return sys.stdin.readline()
 
-    def _get_description(self, proc: "Proc") -> str:
+    def _get_description(self, proc: Proc) -> str:
         """Get description text for a process."""
         name = proc.name or ""
         if proc.more_info:
             name += f" - {proc.more_info}"
         return name
 
-    def completed_proc(self, p: "Proc") -> None:
+    def completed_proc(self, p: Proc) -> None:
         self.start_proc(p)
         self.end_proc(p)
 
@@ -197,9 +199,7 @@ class Term:
         if disp.proc.log_filename:
             abs_path = os.path.abspath(disp.proc.log_filename)
             filename_escaped = escape(disp.proc.log_filename)
-            title = Text.from_markup(
-                f"[link=file://{abs_path} {link_bg_style}]{filename_escaped}[/link]"
-            )
+            title = Text.from_markup(f"[link=file://{abs_path} {link_bg_style}]{filename_escaped}[/link]")
             parts.insert(1, title)
         return Group(*parts)
 
@@ -334,13 +334,13 @@ class Term:
 class TermSimple(Term):
     """Static terminal display: one line per task, no live updates."""
 
-    def start_proc(self, p: "Proc") -> None:
+    def start_proc(self, p: Proc) -> None:
         disp = Displayable(p)
         disp.start_time = time.time()
         self.active[p] = disp
         self._render_proc_static(disp)
 
-    def end_proc(self, p: "Proc") -> None:
+    def end_proc(self, p: Proc) -> None:
         if p not in self.active:
             return
         disp = self.active[p]
@@ -379,7 +379,7 @@ class TermDynamic(Term):
             )
             self.live.start()
 
-    def start_proc(self, p: "Proc") -> None:
+    def start_proc(self, p: Proc) -> None:
         disp = Displayable(p)
         disp.start_time = time.time()
         self.active[p] = disp
@@ -397,7 +397,7 @@ class TermDynamic(Term):
             if self.live is not None:
                 self.live.update(self._render_display())
 
-    def end_proc(self, p: "Proc") -> None:
+    def end_proc(self, p: Proc) -> None:
         if p not in self.active:
             return
         disp = self.active[p]

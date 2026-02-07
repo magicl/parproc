@@ -8,45 +8,21 @@ from typing import Any, TypeVar
 BaseModel: type[Any] | None = None
 try:
     from pydantic import BaseModel as _PydanticBaseModel
+
     BaseModel = _PydanticBaseModel
 except ImportError:
     pass
 
 from .types import (
     FAILED_STATES,
+    SUCCEEDED_STATES,
     ProcessError,
     ProcState,
     SpecialDep,
-    SUCCEEDED_STATES,
     UserError,
 )
 
 logger = logging.getLogger('par')
-
-# Injected by par on load; proc never imports par to avoid circular import.
-_manager_getter: Callable[[], Any] | None = None
-_run_task_fn: Callable[..., Any] | None = None
-
-
-def register_manager_getter(getter: Callable[[], Any]) -> None:
-    global _manager_getter  # pylint: disable=global-statement
-    _manager_getter = getter
-
-
-def register_run_task(fn: Callable[..., Any]) -> None:
-    global _run_task_fn  # pylint: disable=global-statement
-    _run_task_fn = fn
-
-
-def _get_manager() -> Any:
-    if _manager_getter is None:
-        return None
-    return _manager_getter()
-
-
-def _get_run_task() -> Any:
-    return _run_task_fn
-
 
 F = TypeVar('F', bound=Callable[..., Any])
 
@@ -92,6 +68,7 @@ class ProcContext:
 
     def wait(self, *names: str) -> None:
         import time  # pylint: disable=import-outside-toplevel
+
         while True:
             res = self._cmd(req='check-complete', names=list(names))
             if res['failure']:
@@ -112,6 +89,19 @@ class Proc:
     deps   - process dependencies (proc names and/or SpecialDep). will not be run until these are satisfied
     locks  - list of locks. only one process can own a lock at any given time
     """
+
+    # Set by par on load so Proc never imports par (avoids circular import).
+    _default_manager_getter: Callable[[], Any] | None = None
+    _default_run_task: Callable[..., Any] | None = None
+
+    @classmethod
+    def set_defaults(
+        cls,
+        manager_getter: Callable[[], Any],
+        run_task_fn: Callable[..., Any],
+    ) -> None:
+        cls._default_manager_getter = manager_getter
+        cls._default_run_task = run_task_fn
 
     ERROR_NONE = 0
     ERROR_EXCEPTION = 1
@@ -156,6 +146,7 @@ class Proc:
         self.wave = proto.wave if proto is not None else wave
         self.log_filename = ''
         import uuid  # pylint: disable=import-outside-toplevel
+
         self.run_id = str(uuid.uuid4())
         self.func: Any = None
         self.user_func: Any = None
@@ -181,20 +172,21 @@ class Proc:
         return self.state in FAILED_STATES
 
     def __call__(self, f: F) -> F:
-        run_task_fn = _get_run_task()
+        run_task_fn = Proc._default_run_task
         if run_task_fn is None:
-            raise RuntimeError('parproc.proc.register_run_task() was not called (par not loaded?)')
+            raise RuntimeError('Proc.set_defaults() was not called (par not loaded?)')
 
         def func(queue_to_proc: Any, queue_to_master: Any, context: dict[str, Any], name: str) -> None:
             # Run in child process: no manager here, build ProcContext and run task directly.
             logger.info(f'proc "{name}" started')
             pc = ProcContext(name, context, queue_to_proc, queue_to_master)
-            ret, error, _exc_info = run_task_fn(f, pc, context)
+            ret, error, _exc_info = run_task_fn(f, pc, context)  # pylint: disable=not-callable
             log_filename = os.path.join(str(context['logdir']), name + '.log')
             logger.info(f'proc "{name}" ended: ret = {ret}')
             if BaseModel is not None and isinstance(ret, BaseModel):
                 ret = ret.model_dump()
             import pickle as _pickle  # pylint: disable=import-outside-toplevel  # nosec: B403
+
             msg = {'req': 'proc-complete', 'value': ret, 'log_filename': log_filename, 'error': error}
             try:
                 _pickle.dumps(msg)
@@ -215,7 +207,7 @@ class Proc:
             self.name = f.__name__
         self.user_func = f
         self.func = func
-        manager = _get_manager()
-        if manager is not None:
-            manager.add_proc(self)
+        manager_getter = Proc._default_manager_getter
+        if manager_getter is not None:
+            manager_getter().add_proc(self)
         return f

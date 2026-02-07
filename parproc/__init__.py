@@ -1,11 +1,10 @@
 from .par import (
-    NO_FAILURES,
     Proc,
     ProcContext,
+    ProcessError,
     ProcFailedError,
     ProcManager,
     ProcSkippedError,
-    ProcessError,
     Proto,
     UserError,
     clear,
@@ -21,6 +20,7 @@ from .par import (
     wait_clear,
     wait_for_all,
 )
+from .types import NO_FAILURES
 
 __all__ = [
     'ProcManager',

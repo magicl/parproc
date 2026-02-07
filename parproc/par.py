@@ -11,10 +11,8 @@ import sys
 import tempfile
 import time
 import traceback
-import uuid
 from collections import OrderedDict
 from collections.abc import Callable, Sequence
-from enum import Enum
 from typing import Any, Optional, TypeVar, Union
 
 BaseModel: type[Any] | None = None
@@ -31,11 +29,10 @@ from .runner import MultiProcessRunner, SingleProcessRunner
 from .term import TermDynamic, TermSimple
 from .types import (
     FAILED_STATES,
-    NO_FAILURES,
     SUCCEEDED_STATES,
+    ProcessError,
     ProcFailedError,
     ProcSkippedError,
-    ProcessError,
     ProcState,
     SpecialDep,
     UserError,
@@ -387,9 +384,7 @@ class ProcManager:  # pylint: disable=too-many-public-methods
                             try:
                                 created_names = self.create_proc(proc_name)
                                 matching_rdeps.extend(
-                                    created_names
-                                    if isinstance(created_names, list)
-                                    else [created_names]
+                                    created_names if isinstance(created_names, list) else [created_names]
                                 )
                             except UserError:
                                 # Failed to create proc (e.g., missing args), skip it
@@ -414,9 +409,7 @@ class ProcManager:  # pylint: disable=too-many-public-methods
                                     try:
                                         created_names = self.create_proc(generated_name)
                                         matching_rdeps.extend(
-                                            created_names
-                                            if isinstance(created_names, list)
-                                            else [created_names]
+                                            created_names if isinstance(created_names, list) else [created_names]
                                         )
                                     except UserError:
                                         logger.debug(
@@ -428,9 +421,7 @@ class ProcManager:  # pylint: disable=too-many-public-methods
                                 try:
                                     created_names = self.create_proc(proto.name)
                                     matching_rdeps.extend(
-                                        created_names
-                                        if isinstance(created_names, list)
-                                        else [created_names]
+                                        created_names if isinstance(created_names, list) else [created_names]
                                     )
                                 except UserError:
                                     logger.debug(
@@ -723,11 +714,7 @@ class ProcManager:  # pylint: disable=too-many-public-methods
                     # Already a filled-out name, use it directly
                     logger.debug('Creating proc from filled-out name: "%s"', dep_name_or_pattern)
                     resolved_dep_name = self.create_proc(dep_name_or_pattern)
-                resolved_deps.extend(
-                    resolved_dep_name
-                    if isinstance(resolved_dep_name, list)
-                    else [resolved_dep_name]
-                )
+                resolved_deps.extend(resolved_dep_name if isinstance(resolved_dep_name, list) else [resolved_dep_name])
             else:
                 # No proto match - validate that it's not a proto pattern
                 param_pattern = r'\[([^\]]+)\]'
@@ -833,9 +820,7 @@ class ProcManager:  # pylint: disable=too-many-public-methods
                 filtered = {k: all_args[k] for k in param_names if k in all_args}
                 result = proto.arg_choices(dep_context, **filtered)
             if not isinstance(result, dict):
-                raise UserError(
-                    f'arg_choices callable must return a dict, got {type(result).__name__}'
-                )
+                raise UserError(f'arg_choices callable must return a dict, got {type(result).__name__}')
             # Validate keys are subset of pattern params when we have them
             if proto.regex_params:
                 pattern_params = set(proto.regex_params)
@@ -903,11 +888,9 @@ class ProcManager:  # pylint: disable=too-many-public-methods
         value_lists: list[list[Any]] = []
         for param in proto.regex_params:
             raw = extracted_args.get(param)
-            if param in resolved_arg_choices and self._is_glob_value(raw):
+            if resolved_arg_choices is not None and param in resolved_arg_choices and self._is_glob_value(raw):
                 pattern = str(raw)
-                choices = self._get_arg_choices(
-                    proto, param, request_name, all_args, resolved_arg_choices
-                )
+                choices = self._get_arg_choices(proto, param, request_name, all_args, resolved_arg_choices)
                 matched = [c for c in choices if fnmatch.fnmatch(str(c), pattern)]
                 if not matched:
                     raise UserError(
@@ -932,9 +915,10 @@ class ProcManager:  # pylint: disable=too-many-public-methods
         Create one proc from a proto with the given args. Used for single creation
         and for each combination when expanding globs.
         """
-        actual_proto_name = proto.name
+        if proto.name is None:
+            raise UserError("Proto must have a name to create a proc")
         proc_args, generated_name = self._process_pattern_args_and_generate(
-            actual_proto_name, all_args, proto.func, generate_name=(proc_name is None)
+            proto.name, all_args, proto.func, generate_name=(proc_name is None)
         )
         if proc_name is None:
             if generated_name is None:
@@ -967,9 +951,7 @@ class ProcManager:  # pylint: disable=too-many-public-methods
         proc(proto.func)
         return proc_name
 
-    def create_proc(
-        self, proto_name: str, proc_name: str | None = None
-    ) -> list[str]:
+    def create_proc(self, proto_name: str, proc_name: str | None = None) -> list[str]:
         """
         Create a proc from a proto.
 
@@ -1018,9 +1000,7 @@ class ProcManager:  # pylint: disable=too-many-public-methods
         resolved_arg_choices = self._resolve_arg_choices(proto, proto_name, all_args)
 
         # Check for glob in any extracted arg value
-        has_glob = any(
-            self._is_glob_value(extracted_args.get(p)) for p in proto.regex_params
-        )
+        has_glob = any(self._is_glob_value(extracted_args.get(p)) for p in proto.regex_params)
         if has_glob:
             # Glob is only allowed when arg_choices is set for each globbed param
             if resolved_arg_choices is None:
@@ -1035,18 +1015,14 @@ class ProcManager:  # pylint: disable=too-many-public-methods
                         f'Glob pattern in argument "{param}" is only allowed when '
                         f'the proto defines arg_choices for that argument.'
                     )
-            expanded_list = self._expand_glob_args(
-                proto, extracted_args, proto_name, all_args, resolved_arg_choices
-            )
+            expanded_list = self._expand_glob_args(proto, extracted_args, proto_name, all_args, resolved_arg_choices)
             names: list[str] = []
             for concrete_args in expanded_list:
                 single_all = {}
                 if proto.args:
                     single_all.update(proto.args)
                 single_all.update(concrete_args)
-                names.append(
-                    self._create_single_proc_from_args(proto, single_all, proc_name=None)
-                )
+                names.append(self._create_single_proc_from_args(proto, single_all, proc_name=None))
             return names
 
         # Single creation: validate literal values against arg_choices if set
@@ -1055,14 +1031,10 @@ class ProcManager:  # pylint: disable=too-many-public-methods
                 if param not in extracted_args:
                     continue
                 val = extracted_args[param]
-                choices = self._get_arg_choices(
-                    proto, param, proto_name, all_args, resolved_arg_choices
-                )
+                choices = self._get_arg_choices(proto, param, proto_name, all_args, resolved_arg_choices)
                 allowed_strs = [str(c) for c in choices]
                 if str(val) not in allowed_strs:
-                    raise UserError(
-                        f'Argument "{param}" value {val!r} is not in allowed choices: {list(choices)}'
-                    )
+                    raise UserError(f'Argument "{param}" value {val!r} is not in allowed choices: {list(choices)}')
 
         single_name = self._create_single_proc_from_args(proto, all_args, proc_name)
         return [single_name]
@@ -1294,9 +1266,7 @@ class ProcManager:  # pylint: disable=too-many-public-methods
         # Clear pending_now after processing: each name only needs start_proc once; re-adding
         # names whose state is no longer IDLE would keep them in pending_now forever and stall the loop.
         to_start = [
-            name
-            for name in self.pending_now
-            if name in self.procs and self.procs[name].state == ProcState.IDLE
+            name for name in self.pending_now if name in self.procs and self.procs[name].state == ProcState.IDLE
         ]
         if to_start:
             self.start_proc(*to_start)
@@ -1368,10 +1338,7 @@ class ProcManager:  # pylint: disable=too-many-public-methods
         if msg['req'] == 'check-complete':
             names = _flatten_names(msg['names'])
             # Ensure requested procs are started (task may have called wait(*create()) without start())
-            to_start = [
-                n for n in names
-                if n in self.procs and self.procs[n].state == ProcState.IDLE
-            ]
+            to_start = [n for n in names if n in self.procs and self.procs[n].state == ProcState.IDLE]
             if to_start:
                 self.start_proc(*to_start)
             # In single-process mode, run pending tasks until requested names are complete or failed
@@ -1456,17 +1423,19 @@ def run_task_with_redirect(
         try:
             try:
                 ret = user_func(pc, **pc.args)
-            except ProcSkippedError as e:
-                #Ignore exception info
+            except ProcSkippedError:
+                # Ignore exception info
                 error = Proc.ERROR_SKIPPED
-            except ProcFailedError as e:
-                #Ignore exception info
+            except ProcFailedError:
+                # Ignore exception info
                 error = Proc.ERROR_FAILED
             except Exception as e:  # pylint: disable=broad-exception-caught
                 # Detect sh library ErrorReturnCode (non-zero exit) without importing sh
                 exc_name = type(e).__name__
                 exit_code = getattr(e, 'exit_code', None)
-                is_sh_exit = (exc_name == 'ErrorReturnCode' or exc_name.startswith('ErrorReturnCode_')) and exit_code is not None
+                is_sh_exit = (
+                    exc_name == 'ErrorReturnCode' or exc_name.startswith('ErrorReturnCode_')
+                ) and exit_code is not None
                 if is_sh_exit:
                     error = Proc.ERROR_FAILED
                     log_file.write(f'Command failed with exit code {exit_code}\n')
@@ -1726,7 +1695,7 @@ def set_params(**params: Any) -> None:
 
 # Waits for any previous job to complete, then clears state
 def wait_clear(exception_on_failure: bool = False) -> None:
-    return ProcManager.get_inst().wait_clear(exception_on_failure=exception_on_failure)
+    ProcManager.get_inst().wait_clear(exception_on_failure=exception_on_failure)
 
 
 def clear() -> None:
@@ -1746,9 +1715,7 @@ def _fill_proto_pattern(pattern: str, params: dict[str, Any]) -> str:
     return result
 
 
-def create(
-    proto_name: str, proc_name: str | None = None, **kwargs: Any
-) -> list[str]:
+def create(proto_name: str, proc_name: str | None = None, **kwargs: Any) -> list[str]:
     """Create a proc from a proto. Pass pattern params as keyword args (e.g. create('foo::[x]', x=1)).
     Returns list of proc names (one or more). Use wait(*create(...)) or start(*create(...)).
     """
@@ -1785,7 +1752,5 @@ def wait(*names: str) -> None:
     return ProcManager.get_inst().wait(list(names))
 
 
-# So proc.Proc can call back into par without proc importing par (avoids circular import)
-from . import proc as _proc_module
-_proc_module.register_manager_getter(lambda: ProcManager.get_inst())
-_proc_module.register_run_task(run_task)
+# So Proc can use manager and run_task without proc importing par (avoids circular import)
+Proc.set_defaults(ProcManager.get_inst, run_task)
