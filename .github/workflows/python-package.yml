@@ -33,11 +33,11 @@ jobs:
     - name: Lint
       run: |
         # stop the build if there are Python syntax errors or undefined names
-        pre-commit run pylint --all-files
+        uv run pre-commit run pylint --all-files
     - name: MyPy
       run: |
         # stop the build if there are Python syntax errors or undefined names
-        pre-commit run mypy --all-files
+        uv run pre-commit run mypy --all-files
     - name: Test
       run: |
         ./scripts/test.sh
