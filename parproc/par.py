@@ -1397,7 +1397,8 @@ class ProcManager:  # pylint: disable=too-many-public-methods
             output = output.model_dump()
         p.output = output
         p.error = error
-        p.state = ProcState.SUCCEEDED if error == Proc.ERROR_NONE else ProcState.FAILED
+        # Skipped counts as success for dependency purposes so downstream tasks don't get FAILED_DEP
+        p.state = ProcState.SUCCEEDED if (error == Proc.ERROR_NONE or error == Proc.ERROR_SKIPPED) else ProcState.FAILED
         p.log_filename = log_filename
         if more_info is not None:
             p.more_info = more_info
@@ -1458,16 +1459,23 @@ def run_task_with_redirect(
                 #Ignore exception info
                 error = Proc.ERROR_FAILED
             except Exception as e:  # pylint: disable=broad-exception-caught
-                _, _, tb = sys.exc_info()
-                info = str(e) + '\n' + ''.join(traceback.format_tb(tb))
-                # Only append STDERR_FULL for generic exceptions (ERROR_EXCEPTION)
-                stderr = getattr(e, 'stderr', None)
-                if stderr is not None and isinstance(stderr, bytes):
-                    info += f'\nSTDERR_FULL:\n{stderr.decode("utf-8")}'
-                log_file.write(info)
-                if not redirect:
-                    sys.stderr.write(info)
-                error = Proc.ERROR_EXCEPTION
+                # Detect sh library ErrorReturnCode (non-zero exit) without importing sh
+                exc_name = type(e).__name__
+                exit_code = getattr(e, 'exit_code', None)
+                is_sh_exit = (exc_name == 'ErrorReturnCode' or exc_name.startswith('ErrorReturnCode_')) and exit_code is not None
+                if is_sh_exit:
+                    error = Proc.ERROR_FAILED
+                    log_file.write(f'Command failed with exit code {exit_code}\n')
+                else:
+                    _, _, tb = sys.exc_info()
+                    info = str(e) + '\n' + ''.join(traceback.format_tb(tb))
+                    stderr = getattr(e, 'stderr', None)
+                    if stderr is not None and isinstance(stderr, bytes):
+                        info += f'\nSTDERR_FULL:\n{stderr.decode("utf-8")}'
+                    log_file.write(info)
+                    if not redirect:
+                        sys.stderr.write(info)
+                    error = Proc.ERROR_EXCEPTION
         finally:
             if redirect:
                 try:
