@@ -11,7 +11,6 @@ from rich.console import Console, Group
 from rich.control import Control
 from rich.live import Live
 from rich.markup import escape
-from rich.panel import Panel
 from rich.progress import (
     BarColumn,
     Progress,
@@ -20,6 +19,7 @@ from rich.progress import (
     TextColumn,
     TimeElapsedColumn,
 )
+from rich.rule import Rule
 from rich.syntax import Syntax
 from rich.text import Text
 
@@ -53,6 +53,15 @@ class Displayable:
     # Get number of lines to display for item
     def height(self) -> int:
         return 1 + sum(chunk.end_line - chunk.start_line + 1 for chunk in self.chunks)
+
+
+# Match ANSI SGR sequences (e.g. \x1b[31m or \033[1;31m)
+_ANSI_ESCAPE_RE = re.compile(r"\x1b\[[;\d]*[A-Za-z]")
+
+
+def _has_ansi_color(text: str) -> bool:
+    """Return True if text contains ANSI color/formatting escape sequences."""
+    return bool(_ANSI_ESCAPE_RE.search(text))
 
 
 def _get_error_type_message(disp: Displayable) -> str:
@@ -156,36 +165,43 @@ class Term:
         self.console.print(_format_completed_line_markup(disp))
         self._print_completed_task_log_panels([disp])
 
-    def _log_panel_for_disp(self, disp: Displayable) -> Panel | None:
-        """Build the log panel renderable for a displayable that has chunks. Returns None if no chunks."""
+    def _log_panel_for_disp(self, disp: Displayable) -> Any:
+        """Build the log panel renderable for a displayable that has chunks. Returns None if no chunks.
+        Uses top/bottom rules only (no side borders) so the block stretches full width and wraps on resize.
+        If content contains ANSI color codes, renders with those colors; otherwise uses Syntax highlighting.
+        """
         if not disp.chunks:
             return None
-        chunk_parts = []
-        for i, chunk in enumerate(disp.chunks):
-            line_range = f"lines {chunk.start_line}-{chunk.end_line}"
-            if i > 0:
-                chunk_parts.append(f"\n--- {line_range} ---\n")
-            else:
-                chunk_parts.append(f"--- {line_range} ---\n")
-            chunk_parts.append(chunk.content)
-        log_content_str = "".join(chunk_parts)
-        lexer = "python" if disp.proc.state in FAILED_STATES else "text"
-        log_content = Syntax(
-            log_content_str,
-            lexer=lexer,
-            theme="monokai",
-            line_numbers=False,
-            word_wrap=True,
-        )
-        panel_title = None
+        chunk_parts = [chunk.content for chunk in disp.chunks]
+        log_content_str = "\n\n".join(chunk_parts)
+        is_bug = disp.proc.state in FAILED_STATES
+        border_style = "red" if is_bug else "yellow"
+        link_bg_style = "bold white on dark_red" if is_bug else "bold black on yellow"
+        if _has_ansi_color(log_content_str):
+            log_content = Text.from_ansi(log_content_str)
+        else:
+            lexer = "python" if disp.proc.state in FAILED_STATES else "text"
+            log_content = Syntax(
+                log_content_str,
+                lexer=lexer,
+                theme="monokai",
+                line_numbers=False,
+                word_wrap=True,
+                background_color="default",
+            )
+        parts: list[Any] = [
+            Rule(style=border_style),
+            log_content,
+            Rule(style=border_style),
+        ]
         if disp.proc.log_filename:
             abs_path = os.path.abspath(disp.proc.log_filename)
-            panel_title = f"[link=file://{abs_path}]{disp.proc.log_filename}[/link]"
-        return Panel.fit(
-            log_content,
-            title=panel_title,
-            border_style="red" if disp.proc.state in FAILED_STATES else "dim",
-        )
+            filename_escaped = escape(disp.proc.log_filename)
+            title = Text.from_markup(
+                f"[link=file://{abs_path} {link_bg_style}]{filename_escaped}[/link]"
+            )
+            parts.insert(1, title)
+        return Group(*parts)
 
     def _print_completed_task_log_panels(self, disps: list[Displayable]) -> None:
         """Print log panels for displayables that have chunks (failed task output). Skipped tasks get no panel."""
