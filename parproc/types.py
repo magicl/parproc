@@ -10,9 +10,10 @@ class ProcState(Enum):
     SUCCEEDED = 3
     FAILED = 4
     FAILED_DEP = 5  # Canceled because a dependency is missing or failed
+    SKIPPED = 6  # Proc raised ProcSkippedError; counts as success for dependencies
 
 
-SUCCEEDED_STATES = {ProcState.SUCCEEDED}
+SUCCEEDED_STATES = {ProcState.SUCCEEDED, ProcState.SKIPPED}
 FAILED_STATES = {ProcState.FAILED, ProcState.FAILED_DEP}
 
 

@@ -1397,8 +1397,12 @@ class ProcManager:  # pylint: disable=too-many-public-methods
             output = output.model_dump()
         p.output = output
         p.error = error
-        # Skipped counts as success for dependency purposes so downstream tasks don't get FAILED_DEP
-        p.state = ProcState.SUCCEEDED if (error == Proc.ERROR_NONE or error == Proc.ERROR_SKIPPED) else ProcState.FAILED
+        if error == Proc.ERROR_NONE:
+            p.state = ProcState.SUCCEEDED
+        elif error == Proc.ERROR_SKIPPED:
+            p.state = ProcState.SKIPPED
+        else:
+            p.state = ProcState.FAILED
         p.log_filename = log_filename
         if more_info is not None:
             p.more_info = more_info
