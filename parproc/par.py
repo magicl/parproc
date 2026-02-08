@@ -75,7 +75,9 @@ def _install_signal_handlers() -> None:
                 if p.is_running() and p.process is not None:
                     try:
                         p.process.terminate()
-                    except OSError:
+                    except (OSError, AttributeError):
+                        # OSError: process already gone; AttributeError: Process._popen can be
+                        # None in Python 3.14+ when the child has already exited been reaped
                         pass
             # Restore terminal (cursor, stop Live) so shell is usable after Ctrl+C
             try:
