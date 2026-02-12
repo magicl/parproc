@@ -12,7 +12,7 @@ mkdir -p build dist
 uv build
 
 # Sanity-check before upload
-twine check dist/*
+uv run twine check dist/*
 
 # Upload; uses API token from ~/.pypirc
-twine upload dist/*
+uv run twine upload dist/*
