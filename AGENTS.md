@@ -1,64 +1,59 @@
-# AGENTS.md - Testing Guide
+# AGENTS.md
 
-This document describes how to run tests for the parproc project.
+## Mandatory Workflow
 
-## Running Tests
+Before finishing any task, you **must** run the following and ensure everything passes. Iterate until all checks are green.
 
-Tests are run using the `scripts/test.sh` script. This script uses `uv` to manage dependencies and runs the Python unittest framework.
+### 1. Pre-commit checks
 
-### Basic Usage
+Run all pre-commit hooks on all files:
 
-Run all tests:
+```bash
+uv run pre-commit run --all-files
+```
+
+This runs: yaml/json/toml/xml validation, mypy, black, isort, pylint, pyupgrade, bandit, trailing whitespace, end-of-file fixer, and more. See `.pre-commit-config.yaml` for the full list.
+
+### 2. Tests
+
+Run the full test suite:
+
 ```bash
 bash scripts/test.sh
 ```
 
-### Running Specific Test Modules
+This runs all test modules (`tests.simple`, `tests.proto`, `tests.errorformat`, `tests.conditional_rdeps`) in both multiprocessing and single-process modes via `uv run python -m unittest`.
 
-You can specify which test modules to run by passing them as arguments:
+To run a specific test module:
 
 ```bash
-# Run only simple tests
 bash scripts/test.sh tests.simple
-
-# Run only proto tests
-bash scripts/test.sh tests.proto
-
-# Run multiple test modules
-bash scripts/test.sh tests.simple tests.proto
 ```
 
-### Default Test Modules
+### 3. Iterate
 
-If no arguments are provided, the script runs these test modules by default:
-- `tests.simple`
-- `tests.proto`
-- `tests.errorformat`
+If any pre-commit check or test fails, fix the issue and re-run. Do not consider the task complete until both steps above pass cleanly.
 
-### Test Structure
+## Code Style Requirements
 
-Tests are located in the `tests/` directory:
-- `tests/simple.py` - Basic functionality tests
-- `tests/proto.py` - Proto and process prototype tests
-- `tests/errorformat.py` - Error handling and formatting tests
+### Typing
 
-### Requirements
+- **Use proper types everywhere.** Do not use `Any` unless there is an extremely compelling reason (e.g., interfacing with an untyped third-party API where the type is genuinely unknown and unknowable). If you must use `Any`, add a comment explaining why.
+- The project uses **mypy** for static type checking (see pre-commit config). All code must pass mypy without errors.
 
-- `uv` must be installed and available in PATH
-- Python 3.x must be available
-- All project dependencies must be installed (handled automatically by `uv`)
+### Formatting
 
-### Example Output
+- **black** with `--line-length=120`, `--skip-string-normalization`, `--target-version=py312`
+- **isort** with `--profile=black`
+- **pyupgrade** with `--py312-plus`
 
-When tests run successfully, you'll see output showing:
-- Process execution logs (DEBUG level)
-- Process status indicators (• for running, ✓ for success, ✗ for failure)
-- Final test results
+### Linting
 
-### Troubleshooting
+- **pylint** is enabled (see `.pre-commit-config.yaml` for disabled checks)
+- **bandit** for security checks
 
-If tests fail:
-1. Ensure `uv` is installed: `curl -LsSf https://astral.sh/uv/install.sh | sh`
-2. Check that you're in the project root directory
-3. Verify Python version compatibility
-4. Check test output for specific error messages
+## Project Structure
+
+- `parproc/` — main library code
+- `tests/` — test modules
+- `scripts/test.sh` — test runner script
