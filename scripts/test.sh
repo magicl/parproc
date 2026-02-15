@@ -1,6 +1,6 @@
 #!/bin/bash
 
-target=${*:-tests.simple tests.proto tests.errorformat}
+target=${*:-tests.simple tests.proto tests.errorformat tests.conditional_rdeps}
 timeout_sec=100
 
 # Run full suite in multiprocessing mode, then in single-process mode

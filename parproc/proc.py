@@ -18,6 +18,7 @@ from .types import (
     SUCCEEDED_STATES,
     ProcessError,
     ProcState,
+    RdepRule,
     SpecialDep,
     UserError,
 )
@@ -117,7 +118,7 @@ class Proc:
         f: F | None = None,
         *,
         deps: list[str] | list[str | SpecialDep] | None = None,
-        rdeps: list[str] | None = None,
+        rdeps: list[str | RdepRule] | None = None,
         locks: list[str] | None = None,
         now: bool = False,
         args: dict[str, Any] | None = None,

@@ -27,6 +27,40 @@ class SpecialDep(Enum):
 NO_FAILURES = SpecialDep.NO_FAILURES
 
 
+class RdepRule:
+    """Base class for rdep behavior modifiers.
+
+    Subclasses can be placed alongside plain strings in a Proto/Proc ``rdeps`` list
+    to alter when and how the reverse dependency is injected.
+    """
+
+    def __init__(self, pattern: str):
+        self.pattern = pattern
+
+    def __repr__(self) -> str:
+        return f'{type(self).__name__}({self.pattern!r})'
+
+
+class WhenScheduled(RdepRule):
+    """Conditional reverse dependency that activates only when the declaring proc is scheduled.
+
+    When used in a Proto/Proc ``rdeps`` list, the declaring proc is injected as a
+    dependency of the *target* (the pattern) only when the declaring proc itself is
+    scheduled.  If the declaring proc is not scheduled, the target is unaffected.
+
+    Additionally, scheduling the declaring proc will also schedule the target
+    (creating it from a proto if necessary).
+
+    Example::
+
+        @pp.Proto(name='B', rdeps=[pp.WhenScheduled('A')])
+        def b_proc(context): ...
+
+    If only A is scheduled, B is *not* involved.  If B is scheduled, B is
+    injected as a dependency of A (and A is scheduled too), so B runs first.
+    """
+
+
 class UserError(Exception):
     """Raised by the framework when configuration or API usage is invalid."""
 

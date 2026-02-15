@@ -34,8 +34,10 @@ from .types import (
     ProcFailedError,
     ProcSkippedError,
     ProcState,
+    RdepRule,
     SpecialDep,
     UserError,
+    WhenScheduled,
 )
 
 # pylint: disable=too-many-positional-arguments
@@ -372,6 +374,9 @@ class ProcManager:  # pylint: disable=too-many-public-methods
         # Check all protos for matching rdeps
         for proto in self.protos.values():
             for rdep in proto.rdeps:
+                # Skip WhenScheduled entries -- they are handled by _process_conditional_rdeps
+                if isinstance(rdep, RdepRule):
+                    continue
                 if self._match_rdep_pattern(rdep, proc_name):
                     # Found a matching rdep - need to create a proc from this proto
                     if proto.name is None:
@@ -433,6 +438,9 @@ class ProcManager:  # pylint: disable=too-many-public-methods
         # Check all existing procs for matching rdeps
         for proc in self.procs.values():
             for rdep in proc.rdeps:
+                # Skip WhenScheduled entries -- they are handled by _process_conditional_rdeps
+                if isinstance(rdep, RdepRule):
+                    continue
                 if self._match_rdep_pattern(rdep, proc_name):
                     # Found a matching rdep - add this proc as a dependency
                     if proc.name is not None and proc.name not in matching_rdeps:
@@ -448,6 +456,24 @@ class ProcManager:  # pylint: disable=too-many-public-methods
             if rdep_proc_name not in p.deps:
                 logger.debug(f'Injecting rdep "{rdep_proc_name}" as dependency of "{p.name}"')
                 p.deps.append(rdep_proc_name)
+
+        # Reverse direction: check if any already-WANTED procs have WhenScheduled rdeps
+        # matching this proc name. If so, inject those procs as dependencies of `name`.
+        # This handles the case where B (with WhenScheduled('A')) became WANTED before A.
+        for other_name, other_proc in list(self.procs.items()):
+            if other_name == name:
+                continue
+            if other_proc.state not in (ProcState.WANTED, ProcState.RUNNING):
+                continue
+            for rdep in other_proc.rdeps:
+                if isinstance(rdep, WhenScheduled) and self._match_rdep_pattern(rdep.pattern, name):
+                    if other_name not in p.deps:
+                        logger.debug(
+                            f'Injecting conditional rdep "{other_name}" as dependency of "{name}" '
+                            f'(reverse direction)'
+                        )
+                        p.deps.append(other_name)
+
         # Check if any dependencies have a higher wave than current proc - this could cause deadlock
         for d in p.deps:
             if isinstance(d, str) and d in self.procs:
@@ -458,20 +484,126 @@ class ProcManager:  # pylint: disable=too-many-public-methods
                         f'Dependencies must have equal or lower wave number to avoid deadlock.'
                     )
 
+    def _process_conditional_rdeps(self, name: str) -> None:
+        """Process WhenScheduled rdeps for a proc that just became WANTED.
+
+        For each ``WhenScheduled(pattern)`` in the proc's (or its proto's) rdeps:
+        1. Resolve the concrete target proc name from the pattern (filling in params
+           extracted from *name*).
+        2. Create the target proc from a proto if it does not exist yet.
+        3. Inject *name* as a dependency of the target.
+        4. Schedule the target (set to WANTED) if it is IDLE.
+        5. Raise ``UserError`` if the target is already RUNNING or finished -- the
+           ordering contract cannot be satisfied.
+        """
+        proc = self.procs[name]
+
+        # Collect WhenScheduled entries from the proc (which inherits proto rdeps)
+        conditional: list[WhenScheduled] = [r for r in proc.rdeps if isinstance(r, WhenScheduled)]
+        if not conditional:
+            return
+
+        # Extract params from proc name via its proto pattern (if any)
+        proto = proc.proto
+        proc_args: dict[str, str] = {}
+        if proto is not None and proto.name is not None:
+            extracted = proto.match_and_extract(name)
+            if extracted is not None:
+                proc_args = extracted
+
+        param_pattern = r'\[([^\]]+)\]'
+
+        for crdep in conditional:
+            target_pattern = crdep.pattern
+
+            # Fill placeholders in the target pattern using proc_args
+            target_params = re.findall(param_pattern, target_pattern)
+            if target_params:
+                target_name = target_pattern
+                for tp in target_params:
+                    if tp in proc_args:
+                        target_name = target_name.replace(f'[{tp}]', str(proc_args[tp]))
+                # If there are still unresolved placeholders, we cannot create the target
+                if re.search(param_pattern, target_name):
+                    logger.debug(
+                        f'Cannot resolve WhenScheduled target "{target_pattern}" for proc "{name}" '
+                        f'(unresolved placeholders in "{target_name}")'
+                    )
+                    continue
+            else:
+                target_name = target_pattern
+
+            # Create the target proc from a proto if it doesn't exist
+            if target_name not in self.procs:
+                match = self._find_matching_proto(target_name)
+                if match is not None:
+                    try:
+                        self.create_proc(target_name)
+                    except UserError:
+                        logger.debug(f'Failed to create target proc "{target_name}" for WhenScheduled rdep of "{name}"')
+                        continue
+                else:
+                    logger.debug(f'No proto found for WhenScheduled target "{target_name}" (from proc "{name}")')
+                    continue
+
+            target_proc = self.procs[target_name]
+
+            # Check target state -- fail hard if already past WANTED
+            if target_proc.state in (
+                ProcState.RUNNING,
+                ProcState.SUCCEEDED,
+                ProcState.FAILED,
+                ProcState.FAILED_DEP,
+                ProcState.SKIPPED,
+            ):
+                raise UserError(
+                    f'Proc "{name}" has a WhenScheduled rdep on "{target_name}", but "{target_name}" '
+                    f'is already {target_proc.state.name}. The ordering contract (run "{name}" before '
+                    f'"{target_name}") cannot be satisfied because "{name}" was scheduled too late.'
+                )
+
+            # Inject name as a dependency of the target
+            if name not in target_proc.deps:
+                logger.debug(f'Injecting conditional rdep "{name}" as dependency of "{target_name}"')
+                target_proc.deps.append(name)
+
+            # Wave validation
+            if target_proc.wave < proc.wave:
+                raise UserError(
+                    f'Proc "{target_name}" (wave {target_proc.wave}) cannot depend on proc "{name}" '
+                    f'(wave {proc.wave}). Dependencies must have equal or lower wave number to avoid deadlock.'
+                )
+
+            # Schedule the target if still IDLE
+            if target_proc.state == ProcState.IDLE:
+                logger.debug(f'SCHED (via WhenScheduled): "{target_name}"')
+                target_proc.state = ProcState.WANTED
+                self._inject_rdeps(target_name)
+                # Recursively process conditional rdeps of the target too
+                self._process_conditional_rdeps(target_name)
+                self.sched_deps(target_proc)
+
     # Schedules one or more procs for execution
     def start_proc(self, *names: str) -> None:
+        # Two-pass approach: first set all procs to WANTED and resolve rdeps,
+        # then schedule deps and start execution.  This ensures that when
+        # start_proc('A', 'B') is called and B has a WhenScheduled('A'),
+        # both A and B are WANTED before any execution begins.
+        newly_wanted: list[tuple[str, 'Proc']] = []
         for name in names:
             p = self.procs[name]
             # No-op if already running, wanted, or complete; only start when IDLE
             if p.state == ProcState.IDLE:
                 logger.debug(f'SCHED: "{p.name}"')
                 p.state = ProcState.WANTED
-
                 self._inject_rdeps(name)
+                self._process_conditional_rdeps(name)
+                newly_wanted.append((name, p))
 
-                # Set dependencies as wanted or missing
-                if not self.sched_deps(p):  # If no unresolved or unfinished dependencies
-                    self.try_execute_one(p)  # See if proc can be executed now
+        for _name, p in newly_wanted:
+            # Set dependencies as wanted or missing
+            if not self.sched_deps(p):  # If no unresolved or unfinished dependencies
+                self.try_execute_one(p)  # See if proc can be executed now
 
     def _cast_args_by_signature(self, func: Callable, filtered_args: dict[str, Any]) -> dict[str, Any]:
         """Cast arguments based on function signature type annotations."""
@@ -1050,6 +1182,7 @@ class ProcManager:  # pylint: disable=too-many-public-methods
                     # Resolve rdeps for this proc so it runs before procs that depend on it
                     self._inject_rdeps(d)
                     self.procs[d].state = ProcState.WANTED
+                    self._process_conditional_rdeps(d)
                     new_deps = True
 
                     # Schedule dependencies of this proc
@@ -1530,7 +1663,7 @@ class Proto:
         name: str | None = None,
         f: F | None = None,
         deps: Sequence[DepInput | SpecialDep] | None = None,
-        rdeps: list[str] | None = None,
+        rdeps: list[str | RdepRule] | None = None,
         locks: list[str] | None = None,
         now: bool = False,
         args: dict[str, Any] | None = None,
