@@ -1,10 +1,18 @@
 #!/bin/bash
+set -e
 
-#Remove any prior builds
-rm -rf ./build/*
-rm -rf ./dist/*
+# Run from repo root (so build/ and dist/ are at top level)
+cd "$(dirname "$0")/.."
 
-python3 -m build
+# Remove any prior builds
+rm -rf build/* dist/* 2>/dev/null || true
+mkdir -p build dist
 
-#Pulls api token from ~/.pypirc
-twine upload dist/*
+# Build (uv is used elsewhere in this project; python3 -m build also works)
+uv build
+
+# Sanity-check before upload
+uv run twine check dist/*
+
+# Upload; uses API token from ~/.pypirc
+uv run twine upload dist/*
