@@ -348,11 +348,8 @@ class TermSimple(Term):
         if disp.proc.log_filename != '':
             with open(disp.proc.log_filename, encoding='utf-8') as f:
                 log_text = f.read()
-            task_failed = disp.proc.state in FAILED_STATES
-            if task_failed and disp.proc.state != ProcState.SKIPPED:
-                disp.chunks = Term.extract_error_log(log_text, task_failed)
-            else:
-                disp.chunks = []
+            task_failed = disp.proc.state in FAILED_STATES and disp.proc.state != ProcState.SKIPPED
+            disp.chunks = Term.extract_error_log(log_text, task_failed)
         self._render_proc_static(disp)
         del self.active[p]
 
@@ -405,11 +402,8 @@ class TermDynamic(Term):
         if disp.proc.log_filename != '':
             with open(disp.proc.log_filename, encoding='utf-8') as f:
                 log_text = f.read()
-            task_failed = disp.proc.state in FAILED_STATES
-            if task_failed and disp.proc.state != ProcState.SKIPPED:
-                disp.chunks = Term.extract_error_log(log_text, task_failed)
-            else:
-                disp.chunks = []
+            task_failed = disp.proc.state in FAILED_STATES and disp.proc.state != ProcState.SKIPPED
+            disp.chunks = Term.extract_error_log(log_text, task_failed)
         if disp.start_time is not None:
             elapsed = time.time() - disp.start_time
             disp.execution_time = f" ({elapsed:.2f}s)"
