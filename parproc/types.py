@@ -61,6 +61,29 @@ class WhenScheduled(RdepRule):
     """
 
 
+class WhenTargetScheduled(RdepRule):
+    """Conditional reverse dependency that activates only when the *target* proc is scheduled.
+
+    When used in a Proto/Proc ``rdeps`` list, the declaring proc is injected as a
+    dependency of the *target* (the pattern) only when the target itself is
+    scheduled.  If the target is not scheduled, the declaring proc is unaffected
+    and runs on its own (if scheduled independently).
+
+    Unlike :class:`WhenScheduled`, this does **not** auto-schedule the target.
+    Instead, the declaring proc is auto-created (from a proto if necessary) and
+    scheduled when the target is scheduled.
+
+    Example::
+
+        @pp.Proto(name='B', rdeps=[pp.WhenTargetScheduled('A')])
+        def b_proc(context): ...
+
+    If only B is scheduled, A is *not* involved — B runs alone.  If A is
+    scheduled, B is auto-created/scheduled and injected as a dependency of A,
+    so B runs first.
+    """
+
+
 class UserError(Exception):
     """Raised by the framework when configuration or API usage is invalid."""
 

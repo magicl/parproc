@@ -38,6 +38,7 @@ from .types import (
     SpecialDep,
     UserError,
     WhenScheduled,
+    WhenTargetScheduled,
 )
 
 # pylint: disable=too-many-positional-arguments
@@ -374,10 +375,17 @@ class ProcManager:  # pylint: disable=too-many-public-methods
         # Check all protos for matching rdeps
         for proto in self.protos.values():
             for rdep in proto.rdeps:
-                # Skip WhenScheduled entries -- they are handled by _process_conditional_rdeps
-                if isinstance(rdep, RdepRule):
+                # Skip WhenScheduled -- handled by _process_conditional_rdeps
+                if isinstance(rdep, WhenScheduled):
                     continue
-                if self._match_rdep_pattern(rdep, proc_name):
+                # WhenTargetScheduled activates when the target is scheduled (like normal rdeps)
+                if isinstance(rdep, WhenTargetScheduled):
+                    rdep_str = rdep.pattern
+                elif isinstance(rdep, RdepRule):
+                    continue
+                else:
+                    rdep_str = rdep
+                if self._match_rdep_pattern(rdep_str, proc_name):
                     # Found a matching rdep - need to create a proc from this proto
                     if proto.name is None:
                         continue
@@ -396,7 +404,7 @@ class ProcManager:  # pylint: disable=too-many-public-methods
                             except UserError:
                                 # Failed to create proc (e.g., missing args), skip it
                                 logger.debug(
-                                    f'Failed to create proc from proto "{proto.name}" with rdep "{rdep}" matching "{proc_name}"'
+                                    f'Failed to create proc from proto "{proto.name}" with rdep "{rdep_str}" matching "{proc_name}"'
                                 )
                     else:
                         # proc_name doesn't match proto pattern (rdep pattern differs from proto pattern).
@@ -404,24 +412,35 @@ class ProcManager:  # pylint: disable=too-many-public-methods
                         # pattern must appear in the rdep pattern (and thus in rdep_args) for injection.
                         # E.g. rdep "k8s.build-image::[target]::frontend" matching "k8s.build-image::stage::frontend"
                         # gives target=stage; then create proto "next.build::[target]" as "next.build::stage".
-                        rdep_args = self._extract_from_rdep_pattern(rdep, proc_name)
+                        rdep_args = self._extract_from_rdep_pattern(rdep_str, proc_name)
                         if rdep_args is not None:
                             param_pattern = r'\[([^\]]+)\]'
                             proto_params = re.findall(param_pattern, proto.name)
-                            if proto_params and all(p in rdep_args for p in proto_params):
-                                generated_name = proto.name
-                                for param in proto_params:
-                                    generated_name = generated_name.replace(f'[{param}]', str(rdep_args[param]))
-                                if generated_name not in self.procs:
-                                    try:
-                                        created_names = self.create_proc(generated_name)
-                                        matching_rdeps.extend(
-                                            created_names if isinstance(created_names, list) else [created_names]
-                                        )
-                                    except UserError:
-                                        logger.debug(
-                                            f'Failed to create proc from proto "{proto.name}" with rdep "{rdep}" matching "{proc_name}"'
-                                        )
+                            if proto_params:
+                                if all(p in rdep_args for p in proto_params):
+                                    generated_name = proto.name
+                                    for param in proto_params:
+                                        generated_name = generated_name.replace(f'[{param}]', str(rdep_args[param]))
+                                    if generated_name not in self.procs:
+                                        try:
+                                            created_names = self.create_proc(generated_name)
+                                            matching_rdeps.extend(
+                                                created_names if isinstance(created_names, list) else [created_names]
+                                            )
+                                        except UserError:
+                                            logger.debug(
+                                                f'Failed to create proc from proto "{proto.name}" with rdep "{rdep_str}" matching "{proc_name}"'
+                                            )
+                            elif proto.name not in self.procs:
+                                try:
+                                    created_names = self.create_proc(proto.name)
+                                    matching_rdeps.extend(
+                                        created_names if isinstance(created_names, list) else [created_names]
+                                    )
+                                except UserError:
+                                    logger.debug(
+                                        f'Failed to create proc from proto "{proto.name}" with rdep "{rdep_str}" matching "{proc_name}"'
+                                    )
                         elif not re.search(r'\[([^\]]+)\]', proto.name):
                             # Proto name is exact (no pattern) - create proc from it
                             if proto.name not in self.procs:
@@ -432,16 +451,22 @@ class ProcManager:  # pylint: disable=too-many-public-methods
                                     )
                                 except UserError:
                                     logger.debug(
-                                        f'Failed to create proc from proto "{proto.name}" with rdep "{rdep}" matching "{proc_name}"'
+                                        f'Failed to create proc from proto "{proto.name}" with rdep "{rdep_str}" matching "{proc_name}"'
                                     )
 
         # Check all existing procs for matching rdeps
         for proc in self.procs.values():
             for rdep in proc.rdeps:
-                # Skip WhenScheduled entries -- they are handled by _process_conditional_rdeps
-                if isinstance(rdep, RdepRule):
+                # Skip WhenScheduled -- handled by _process_conditional_rdeps
+                if isinstance(rdep, WhenScheduled):
                     continue
-                if self._match_rdep_pattern(rdep, proc_name):
+                if isinstance(rdep, WhenTargetScheduled):
+                    rdep_str = rdep.pattern
+                elif isinstance(rdep, RdepRule):
+                    continue
+                else:
+                    rdep_str = rdep
+                if self._match_rdep_pattern(rdep_str, proc_name):
                     # Found a matching rdep - add this proc as a dependency
                     if proc.name is not None and proc.name not in matching_rdeps:
                         matching_rdeps.append(proc.name)
@@ -484,26 +509,14 @@ class ProcManager:  # pylint: disable=too-many-public-methods
                         f'Dependencies must have equal or lower wave number to avoid deadlock.'
                     )
 
-    def _process_conditional_rdeps(self, name: str) -> None:
-        """Process WhenScheduled rdeps for a proc that just became WANTED.
+    def _resolve_crdep_target_name(self, name: str, target_pattern: str) -> str | None:
+        """Resolve a conditional-rdep target pattern to a concrete name.
 
-        For each ``WhenScheduled(pattern)`` in the proc's (or its proto's) rdeps:
-        1. Resolve the concrete target proc name from the pattern (filling in params
-           extracted from *name*).
-        2. Create the target proc from a proto if it does not exist yet.
-        3. Inject *name* as a dependency of the target.
-        4. Schedule the target (set to WANTED) if it is IDLE.
-        5. Raise ``UserError`` if the target is already RUNNING or finished -- the
-           ordering contract cannot be satisfied.
+        Fills ``[param]`` placeholders using params extracted from *name*
+        (via its proto pattern).  Returns ``None`` when placeholders remain
+        unresolved.
         """
         proc = self.procs[name]
-
-        # Collect WhenScheduled entries from the proc (which inherits proto rdeps)
-        conditional: list[WhenScheduled] = [r for r in proc.rdeps if isinstance(r, WhenScheduled)]
-        if not conditional:
-            return
-
-        # Extract params from proc name via its proto pattern (if any)
         proto = proc.proto
         proc_args: dict[str, str] = {}
         if proto is not None and proto.name is not None:
@@ -512,26 +525,49 @@ class ProcManager:  # pylint: disable=too-many-public-methods
                 proc_args = extracted
 
         param_pattern = r'\[([^\]]+)\]'
+        target_params = re.findall(param_pattern, target_pattern)
+        if target_params:
+            target_name = target_pattern
+            for tp in target_params:
+                if tp in proc_args:
+                    target_name = target_name.replace(f'[{tp}]', str(proc_args[tp]))
+            if re.search(param_pattern, target_name):
+                return None
+            return target_name
+        return target_pattern
 
-        for crdep in conditional:
-            target_pattern = crdep.pattern
+    def _process_conditional_rdeps(self, name: str) -> None:
+        """Process conditional rdeps for a proc that just became WANTED.
 
-            # Fill placeholders in the target pattern using proc_args
-            target_params = re.findall(param_pattern, target_pattern)
-            if target_params:
-                target_name = target_pattern
-                for tp in target_params:
-                    if tp in proc_args:
-                        target_name = target_name.replace(f'[{tp}]', str(proc_args[tp]))
-                # If there are still unresolved placeholders, we cannot create the target
-                if re.search(param_pattern, target_name):
-                    logger.debug(
-                        f'Cannot resolve WhenScheduled target "{target_pattern}" for proc "{name}" '
-                        f'(unresolved placeholders in "{target_name}")'
-                    )
-                    continue
-            else:
-                target_name = target_pattern
+        **WhenScheduled(pattern)**: the declaring proc is scheduled →
+        1. Resolve the concrete target proc name from the pattern.
+        2. Create the target proc from a proto if it does not exist yet.
+        3. Inject *name* as a dependency of the target.
+        4. Schedule the target (set to WANTED) if it is IDLE.
+        5. Raise ``UserError`` if the target is already RUNNING or finished.
+
+        **WhenTargetScheduled(pattern)**: the target is already scheduled →
+        1. Resolve the concrete target proc name from the pattern.
+        2. If the target exists and is WANTED, inject *name* as a dependency.
+        3. If the target is RUNNING or finished, raise ``UserError``.
+        4. If the target is not scheduled (IDLE or missing), do nothing.
+        """
+        proc = self.procs[name]
+
+        ws_rdeps: list[WhenScheduled] = [r for r in proc.rdeps if isinstance(r, WhenScheduled)]
+        wts_rdeps: list[WhenTargetScheduled] = [r for r in proc.rdeps if isinstance(r, WhenTargetScheduled)]
+        if not ws_rdeps and not wts_rdeps:
+            return
+
+        # --- WhenScheduled rdeps ---
+        for crdep in ws_rdeps:
+            target_name = self._resolve_crdep_target_name(name, crdep.pattern)
+            if target_name is None:
+                logger.debug(
+                    f'Cannot resolve WhenScheduled target "{crdep.pattern}" for proc "{name}" '
+                    f'(unresolved placeholders)'
+                )
+                continue
 
             # Create the target proc from a proto if it doesn't exist
             if target_name not in self.procs:
@@ -582,6 +618,54 @@ class ProcManager:  # pylint: disable=too-many-public-methods
                 # Recursively process conditional rdeps of the target too
                 self._process_conditional_rdeps(target_name)
                 self.sched_deps(target_proc)
+
+        # --- WhenTargetScheduled rdeps (reverse direction) ---
+        for wts_rdep in wts_rdeps:
+            target_name = self._resolve_crdep_target_name(name, wts_rdep.pattern)
+            if target_name is None:
+                logger.debug(
+                    f'Cannot resolve WhenTargetScheduled target "{wts_rdep.pattern}" for proc "{name}" '
+                    f'(unresolved placeholders)'
+                )
+                continue
+
+            if target_name not in self.procs:
+                continue
+
+            target_proc = self.procs[target_name]
+
+            # Only activate if the target is already scheduled
+            if target_proc.state == ProcState.IDLE:
+                continue
+
+            # Fail hard if the target is already past WANTED
+            if target_proc.state in (
+                ProcState.RUNNING,
+                ProcState.SUCCEEDED,
+                ProcState.FAILED,
+                ProcState.FAILED_DEP,
+                ProcState.SKIPPED,
+            ):
+                raise UserError(
+                    f'Proc "{name}" has a WhenTargetScheduled rdep on "{target_name}", but "{target_name}" '
+                    f'is already {target_proc.state.name}. The ordering contract (run "{name}" before '
+                    f'"{target_name}") cannot be satisfied because "{name}" was scheduled too late.'
+                )
+
+            # Target is WANTED -- inject name as a dependency
+            if name not in target_proc.deps:
+                logger.debug(
+                    f'Injecting WhenTargetScheduled rdep "{name}" as dependency of "{target_name}" '
+                    f'(reverse direction)'
+                )
+                target_proc.deps.append(name)
+
+            # Wave validation
+            if target_proc.wave < proc.wave:
+                raise UserError(
+                    f'Proc "{target_name}" (wave {target_proc.wave}) cannot depend on proc "{name}" '
+                    f'(wave {proc.wave}). Dependencies must have equal or lower wave number to avoid deadlock.'
+                )
 
     # Schedules one or more procs for execution
     def start_proc(self, *names: str) -> None:

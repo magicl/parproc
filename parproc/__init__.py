@@ -20,7 +20,7 @@ from .par import (
     wait_clear,
     wait_for_all,
 )
-from .types import NO_FAILURES, RdepRule, WhenScheduled
+from .types import NO_FAILURES, RdepRule, WhenScheduled, WhenTargetScheduled
 
 __all__ = [
     'ProcManager',
@@ -34,6 +34,7 @@ __all__ = [
     'NO_FAILURES',
     'RdepRule',
     'WhenScheduled',
+    'WhenTargetScheduled',
     'wait_for_all',
     'results',
     'set_params',
