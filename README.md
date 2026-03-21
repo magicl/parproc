@@ -388,7 +388,7 @@ The task DB is purely an optimization. It is safe to delete it at any time. When
 
 ## Watch mode
 
-Watch mode combines incremental builds with file system monitoring. After the initial run, it continuously watches declared `inputs` for changes and re-executes affected procs and their downstream dependents.
+Watch mode combines incremental builds with file system monitoring. Call `run` first to schedule work; `watch` waits for that in-flight graph to finish, then watches declared `inputs` and re-executes affected procs and their downstream dependents. For a full initial build (no incremental skip), use `run(..., full=True)` before `watch()` — `watch` does not take a `full` argument so incremental behavior stays consistent with what `run` already set.
 
 ```python
 pp.run('build::prod')
@@ -402,7 +402,7 @@ Or watch only specific procs:
 pp.watch('build::prod', 'test::prod')
 ```
 
-Watch mode requires the `watchdog` package (`pip install watchdog`). If not installed and `pp.watch()` is called, a `UserError` is raised with an install hint.
+Watch mode uses the `watchdog` package to detect file changes (it is a core dependency of parproc).
 
 ### How watch mode handles re-runs
 

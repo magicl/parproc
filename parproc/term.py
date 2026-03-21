@@ -91,7 +91,7 @@ def _get_error_type_message(disp: Displayable) -> str:
 def _format_completed_line_markup(disp: Displayable) -> str:
     """Return markup string for one completed task line (for live area or print)."""
     if disp.proc.state == ProcState.UP_TO_DATE:
-        status = "[bold cyan]⊘[/bold cyan]"  # up-to-date (auto-skipped)
+        status = "[bold green]↷[/bold green]"  # up-to-date (auto-skipped)
     elif disp.proc.state == ProcState.SKIPPED:
         status = "[bold yellow]⊘[/bold yellow]"  # skipped
     elif disp.proc.state == ProcState.SUCCEEDED:
@@ -227,7 +227,7 @@ class Term:
     def _render_proc_static(self, disp: Displayable) -> None:
         """Render a process in static (non-dynamic) mode."""
         if disp.proc.state == ProcState.UP_TO_DATE:
-            status = "[bold cyan]⊘[/bold cyan]"  # up-to-date
+            status = "[bold green]↷[/bold green]"  # up-to-date
         elif disp.proc.state == ProcState.SKIPPED:
             status = "[bold yellow]⊘[/bold yellow]"  # skipped
         elif disp.proc.state == ProcState.SUCCEEDED:

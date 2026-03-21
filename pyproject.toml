@@ -27,6 +27,7 @@ classifiers = [
 dependencies = [
     "pydantic>=2.0.0",
     "rich>=14.0.0",
+    "watchdog>=4.0.0",
 ]
 
 [project.optional-dependencies]

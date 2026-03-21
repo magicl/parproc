@@ -398,7 +398,7 @@ class TestCallableInputs(IncrementalBaseTest):
 
         @pp.Proto(
             name='build::[target]',
-            inputs=lambda ctx, target: [os.path.join(tmpdir, f'src_{target}.txt')],
+            inputs=[lambda ctx, target: [os.path.join(tmpdir, f'src_{target}.txt')]],
         )
         def build(ctx: pp.ProcContext, target: str) -> str:
             return f'built_{target}'
@@ -412,7 +412,7 @@ class TestCallableInputs(IncrementalBaseTest):
 
         @pp.Proto(
             name='build::[target]',
-            inputs=lambda ctx, target: [os.path.join(tmpdir, f'src_{target}.txt')],
+            inputs=[lambda ctx, target: [os.path.join(tmpdir, f'src_{target}.txt')]],
         )
         def build2(ctx: pp.ProcContext, target: str) -> str:
             return f'built2_{target}'
@@ -422,6 +422,54 @@ class TestCallableInputs(IncrementalBaseTest):
         procs = pp.get_procs()
         self.assertEqual(procs['build::a'].state, ProcState.UP_TO_DATE)
         self.assertEqual(pp.results()['build::a'], 'built_a')
+
+
+class TestRegexFilesInputs(IncrementalBaseTest):
+    """``regex_files`` input specs: regex match on paths relative to a single root directory."""
+
+    def test_invalid_regex_raises(self) -> None:
+        with self.assertRaises(pp.UserError) as cm:
+            pp.regex_files(self._tmpdir, '(')
+        self.assertIn('regex', str(cm.exception).lower())
+
+    def test_second_run_skips_when_matched_files_unchanged(self) -> None:
+        self._write_file('sub/deep.py', 'code')
+        self._write_file('sub/readme.txt', 'txt')
+
+        spec = pp.regex_files(self._tmpdir, r'.*\.py$')
+
+        @pp.Proto(name='build', inputs=[spec])
+        def build(ctx: pp.ProcContext) -> str:
+            return 'built_v1'
+
+        pp.run('build')
+        pp.wait_for_all()
+        self.assertEqual(pp.results()['build'], 'built_v1')
+
+        pp.clear()
+        pp.set_options(mode=_test_mode(), dynamic=False, task_db_path=self._db_path)
+
+        @pp.Proto(name='build', inputs=[spec])
+        def build2(ctx: pp.ProcContext) -> str:
+            return 'built_v2'
+
+        pp.run('build')
+        pp.wait_for_all()
+        procs = pp.get_procs()
+        self.assertEqual(procs['build'].state, ProcState.UP_TO_DATE)
+        self.assertEqual(pp.results()['build'], 'built_v1')
+
+    def test_root_not_a_directory_raises(self) -> None:
+        missing = os.path.join(self._tmpdir, 'not_a_dir')
+        spec = pp.regex_files(missing, r'.*')
+
+        @pp.Proto(name='build', inputs=[spec])
+        def build(ctx: pp.ProcContext) -> str:
+            return 'x'
+
+        with self.assertRaises(pp.UserError) as cm:
+            pp.run('build')
+        self.assertIn('directory', str(cm.exception).lower())
 
 
 class TestGeneration(IncrementalBaseTest):

@@ -2,36 +2,17 @@
 
 Monitors declared input paths for changes and maps them back to proc names
 so the scheduler knows which procs have become dirty.
-
-Requires the ``watchdog`` package (optional dependency).  If not installed,
-importing this module succeeds but ``FileWatcher.start()`` raises ``UserError``
-with an install hint.
 """
 
 import logging
+import os
 import threading
 from typing import Any
 
-from .types import UserError
+from watchdog.events import FileSystemEventHandler
+from watchdog.observers import Observer
 
 logger = logging.getLogger('par')
-
-try:
-    from watchdog.events import FileSystemEvent, FileSystemEventHandler
-    from watchdog.observers import Observer
-
-    _HAS_WATCHDOG = True
-except ImportError:  # pragma: no cover
-    _HAS_WATCHDOG = False
-    Observer = None
-
-    class FileSystemEventHandler:  # type: ignore[no-redef]
-        """Stub when watchdog is not installed."""
-
-    class FileSystemEvent:  # type: ignore[no-redef]
-        """Stub when watchdog is not installed."""
-
-        src_path: str = ''
 
 
 class _ChangeHandler(FileSystemEventHandler):
@@ -85,7 +66,7 @@ class FileWatcher:
         self._lock = threading.Lock()
         self._path_to_procs: dict[str, set[str]] = {}
         self._handler = _ChangeHandler(self._path_to_procs, self._lock)
-        self._observer: Any = None
+        self._observer: Observer | None = None
 
     def add_proc_inputs(self, proc_name: str, paths: list[str]) -> None:
         """Register resolved input paths for a proc."""
@@ -97,13 +78,6 @@ class FileWatcher:
 
     def start(self) -> None:
         """Start watching all registered paths (background thread)."""
-        if not _HAS_WATCHDOG:
-            raise UserError(
-                'Watch mode requires the "watchdog" package. '
-                'Install it with: pip install watchdog'
-            )
-        import os  # pylint: disable=import-outside-toplevel
-
         self._observer = Observer()
         watched_dirs: set[str] = set()
         with self._lock:

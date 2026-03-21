@@ -14,6 +14,7 @@ import time
 import traceback
 from collections import OrderedDict
 from collections.abc import Callable, Sequence
+from pathlib import Path
 from typing import Any, Optional, TypeVar, Union
 
 BaseModel: type[Any] | None = None
@@ -675,7 +676,8 @@ class ProcManager:  # pylint: disable=too-many-public-methods
         """Resolve a list of file specs (strings or callables) to concrete paths.
 
         Callables receive DepProcContext + filtered args (same convention as dep lambdas).
-        Glob patterns (e.g. ``src/**/*.ts``) are expanded to matching files.
+        Glob patterns (e.g. ``src/**/*.ts``) are expanded to matching files. Use
+        :func:`regex_files` for regular-expression-based listings under one directory.
         """
         raw_paths: list[str] = []
         for spec in specs:
@@ -1910,6 +1912,52 @@ class DepProcContext:
         self.args = args
 
 
+class _RegexFiles:
+    """Callable inputs/outputs spec: files under *root* whose relative path matches a regex."""
+
+    __slots__ = ('_root', '_pattern')
+
+    def __init__(self, root: str | os.PathLike[str], pattern: str) -> None:
+        try:
+            self._pattern = re.compile(pattern)
+        except re.error as e:
+            raise UserError(f'invalid regex in regex_files(): {e}') from e
+        self._root = Path(root).resolve()
+
+    def __call__(self, _ctx: DepProcContext, **_kwargs: Any) -> list[str]:
+        if not self._root.is_dir():
+            raise UserError(f'regex_files root is not a directory: {self._root}')
+        out: list[str] = []
+        for path in self._root.rglob('*'):
+            if not path.is_file():
+                continue
+            rel = path.relative_to(self._root)
+            if self._pattern.search(rel.as_posix()):
+                out.append(str(path.resolve()))
+        return sorted(out)
+
+
+def regex_files(root: str | os.PathLike[str], pattern: str) -> Callable[..., list[str]]:
+    """Return a callable for :attr:`Proto.inputs` / :attr:`Proto.outputs` file lists.
+
+    The callable lists regular files under *root* (recursively). Each file's path relative
+    to *root* is matched with :func:`re.search` using POSIX separators (``/``); directories
+    are not listed.
+
+    Args:
+        root: A single directory. It must exist and be a directory when inputs/outputs are
+            resolved (typically at incremental staleness checks).
+        pattern: Regular expression (e.g. ``r'.*\\.py$'``) tested against each relative path.
+
+    Raises:
+        UserError: If *pattern* is not a valid regular expression.
+
+    Returns:
+        A callable accepted by ``inputs=`` / ``outputs=`` alongside plain glob strings.
+    """
+    return _RegexFiles(root, pattern)
+
+
 class Proto:
     """Decorator for process prototypes. These can be parameterized and instantiated again and again.
 
@@ -2174,16 +2222,20 @@ def run(proto_name: str, proc_name: str | None = None, *, full: bool = False, **
         mgr.start_proc(*names)
 
 
-def watch(*watch_names: str, full: bool = False) -> None:  # pylint: disable=too-many-branches
-    """Watch mode: run incrementally, then watch for input file changes and re-run dirty procs.
+def watch(*watch_names: str) -> None:  # pylint: disable=too-many-branches
+    """Watch mode: wait for in-flight work to finish, then watch inputs and re-run dirty procs.
+
+    Call ``run(...)`` first to schedule the initial graph; this does not change incremental
+    vs full behavior (use ``run(..., full=True)`` before ``watch()`` when you need a full
+    initial build). ``watch`` only calls :meth:`ProcManager.wait_for_all` so anything
+    already started can complete before file watching begins.
 
     Blocks until interrupted (Ctrl+C).
 
     Args:
         watch_names: Proc names to watch.  If empty, watches all procs that have inputs.
-        full: If True, force all procs to run on the initial pass.
 
-    Phase 1: Incremental run (or full if ``full=True``).
+    Phase 1: ``wait_for_all`` (drain work started by prior ``run`` / scheduling).
     Phase 2: Start FileWatcher, block waiting for changes. When changes detected,
     mark affected procs and their transitive dependents as dirty, reset their
     state to IDLE, and re-schedule/execute them. Repeats until interrupted.
@@ -2191,9 +2243,8 @@ def watch(*watch_names: str, full: bool = False) -> None:  # pylint: disable=too
     from .watcher import FileWatcher  # pylint: disable=import-outside-toplevel
 
     mgr = ProcManager.get_inst()
-    mgr._full = full  # pylint: disable=protected-access
 
-    # Phase 1: initial run
+    # Phase 1: let any work already scheduled (e.g. by run()) complete; do not set _full here
     mgr.wait_for_all(exception_on_failure=False)
 
     # Determine which procs to watch
