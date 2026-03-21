@@ -47,7 +47,7 @@ def main() -> None:
     print('Starting initial run, then watch mode (Ctrl+C to exit).')
     print()
 
-    pp.set_options(dynamic=args.live, task_db_path='.output/parproc.db')
+    pp.set_options(dynamic=args.live, task_db_path='.output/parproc.db', watch=True)
     define_procs()
 
     pp.run('task_file1', full=True)

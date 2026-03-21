@@ -304,6 +304,7 @@ pp.set_options(
     parallel=4,                   # max concurrent procs (default: 100)
     mode='mp',                    # 'mp' (multiprocess) or 'single' (in-process)
     dynamic=True,                 # live terminal output (default: True if TTY)
+    watch=False,                  # enable watch() support when true
     name_param_separator='::',    # separator between proto pattern segments
     allow_missing_deps=True,      # don't error on deps that don't exist yet
     task_db_path='build/.parproc.db',  # SQLite DB for run history and result cache
@@ -391,6 +392,7 @@ The task DB is purely an optimization. It is safe to delete it at any time. When
 Watch mode combines incremental builds with file system monitoring. Call `run` first to schedule work; `watch` waits for that in-flight graph to finish, then watches declared `inputs` and re-executes affected procs and their downstream dependents. For a full initial build (no incremental skip), use `run(..., full=True)` before `watch()` — `watch` does not take a `full` argument so incremental behavior stays consistent with what `run` already set.
 
 ```python
+pp.set_options(watch=True, task_db_path='build/.parproc.db')
 pp.run('build::prod')
 pp.run('test::prod')
 pp.watch()  # blocks until Ctrl+C
@@ -403,6 +405,7 @@ pp.watch('build::prod', 'test::prod')
 ```
 
 When explicit proc names are provided, watch mode also watches the declared inputs of their transitive dependencies (as resolved from the initial run graph).
+`watch()` raises `UserError` unless `set_options(watch=True)` was set before scheduling/running.
 
 Watch mode uses the `watchdog` package to detect file changes (it is a core dependency of parproc).
 

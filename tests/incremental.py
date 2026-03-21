@@ -3,6 +3,7 @@
 # pylint: disable=unused-argument
 
 import errno
+import glob as pyglob
 import os
 import tempfile
 import time
@@ -517,8 +518,22 @@ class TestGeneration(IncrementalBaseTest):
 class TestWatch(IncrementalBaseTest):
     """Tests for watch-mode target selection."""
 
+    def test_watch_requires_watch_option(self) -> None:
+        @pp.Proto(name='build')
+        def build(ctx: pp.ProcContext) -> str:
+            del ctx
+            return 'build'
+
+        pp.run('build')
+        pp.wait_for_all()
+
+        with self.assertRaises(pp.UserError) as cm:
+            pp.watch()
+        self.assertIn('set_options(watch=True)', str(cm.exception))
+
     def test_watch_includes_transitive_dependencies_of_explicit_targets(self) -> None:
         src = self._write_file('src.txt', 'v1')
+        pp.set_options(watch=True)
 
         @pp.Proto(name='build', inputs=[src])
         def build(ctx: pp.ProcContext) -> str:
@@ -538,7 +553,17 @@ class TestWatch(IncrementalBaseTest):
         watched_inputs: dict[str, list[str]] = {}
 
         class _FakeFileWatcher:
-            def add_proc_inputs(self, proc_name: str, paths: list[str]) -> None:
+            def clear_watched_procs(self) -> None:
+                watched_inputs.clear()
+
+            def add_proc_inputs(
+                self,
+                proc_name: str,
+                paths: list[str],
+                ignored_paths: list[str] | None = None,
+                ignored_globs: list[str] | None = None,
+            ) -> None:
+                del ignored_paths, ignored_globs
                 watched_inputs[proc_name] = list(paths)
 
             def start(self) -> None:
@@ -551,14 +576,20 @@ class TestWatch(IncrementalBaseTest):
             def stop(self) -> None:
                 return
 
-        with patch('parproc.watcher.FileWatcher', _FakeFileWatcher):
+        mgr = pp.ProcManager.get_inst()
+        old_watcher = mgr._file_watcher  # pylint: disable=protected-access
+        mgr._file_watcher = _FakeFileWatcher()  # type: ignore[assignment]  # pylint: disable=protected-access
+        try:
             pp.watch('deploy')
+        finally:
+            mgr._file_watcher = old_watcher  # pylint: disable=protected-access
 
         self.assertIn('build', watched_inputs)
         self.assertEqual(watched_inputs['build'], [src])
 
     def test_watch_does_not_schedule_unrelated_idle_procs(self) -> None:
         src = self._write_file('src.txt', 'v1')
+        pp.set_options(watch=True)
 
         @pp.Proto(name='build', inputs=[src])
         def build(ctx: pp.ProcContext) -> str:
@@ -585,8 +616,30 @@ class TestWatch(IncrementalBaseTest):
             def __init__(self) -> None:
                 self._calls = 0
 
-            def add_proc_inputs(self, proc_name: str, paths: list[str]) -> None:
-                del proc_name, paths
+            def clear_watched_procs(self) -> None:
+                return
+
+            def add_proc_inputs(
+                self,
+                proc_name: str,
+                paths: list[str],
+                ignored_paths: list[str] | None = None,
+                ignored_globs: list[str] | None = None,
+            ) -> None:
+                del proc_name, paths, ignored_paths, ignored_globs
+
+            def compute_fingerprint(self, paths: list[str], ignored_paths: list[str] | None = None) -> dict[str, float]:
+                del ignored_paths
+                fingerprint: dict[str, float] = {}
+                for path in paths:
+                    try:
+                        fingerprint[path] = os.stat(path).st_mtime_ns
+                    except OSError:
+                        continue
+                return fingerprint
+
+            def path_exists(self, path: str) -> bool:
+                return os.path.exists(path)
 
             def start(self) -> None:
                 return
@@ -604,8 +657,13 @@ class TestWatch(IncrementalBaseTest):
             def stop(self) -> None:
                 return
 
-        with patch('parproc.watcher.FileWatcher', _FakeFileWatcher):
+        mgr = pp.ProcManager.get_inst()
+        old_watcher = mgr._file_watcher  # pylint: disable=protected-access
+        mgr._file_watcher = _FakeFileWatcher()  # type: ignore[assignment]  # pylint: disable=protected-access
+        try:
             pp.watch('deploy')
+        finally:
+            mgr._file_watcher = old_watcher  # pylint: disable=protected-access
 
         self.assertEqual(self._read_counter(), 2)
 
@@ -613,11 +671,58 @@ class TestWatch(IncrementalBaseTest):
 class TestWatcherInternals(IncrementalBaseTest):
     """Unit tests for watcher directory selection and fallback behavior."""
 
+    def test_resolve_inputs_does_not_expand_ignore_globs(self) -> None:
+        keep_file = self._write_file('src/app/main.py', 'ok')
+        _ignored_file = self._write_file('src/vendor/lib.py', 'ignore')
+        input_glob = os.path.join(self._tmpdir, 'src', '**', '*.py')
+        ignored_glob = os.path.join(self._tmpdir, 'src', 'vendor', '**')
+
+        @pp.Proto(name='build', inputs=[input_glob], inputs_ignore=[ignored_glob])
+        def build(ctx: pp.ProcContext) -> str:
+            del ctx
+            return 'build'
+
+        pp.create('build')
+        proc = pp.get_procs()['build']
+        mgr = pp.ProcManager.get_inst()
+        called_patterns: list[str] = []
+        real_glob = pyglob.glob
+
+        def _glob_spy(pattern: str, recursive: bool = False) -> list[str]:
+            called_patterns.append(pattern)
+            return real_glob(pattern, recursive=recursive)
+
+        with patch('parproc.par.globmod.glob', side_effect=_glob_spy):
+            resolved_inputs = mgr._resolve_inputs(proc)  # pylint: disable=protected-access
+
+        self.assertIn(keep_file, resolved_inputs)
+        self.assertNotIn(os.path.join(self._tmpdir, 'src', 'vendor', 'lib.py'), resolved_inputs)
+        self.assertIn(input_glob, called_patterns)
+        self.assertNotIn(ignored_glob, called_patterns)
+
+    def test_resolve_input_watch_paths_uses_glob_roots(self) -> None:
+        source_glob = os.path.join(self._tmpdir, 'src', '**', '*.py')
+        ignored_glob = os.path.join(self._tmpdir, 'src', 'vendor', '**')
+
+        @pp.Proto(name='build', inputs=[source_glob], inputs_ignore=[ignored_glob])
+        def build(ctx: pp.ProcContext) -> str:
+            del ctx
+            return 'build'
+
+        pp.create('build')
+        proc = pp.get_procs()['build']
+        mgr = pp.ProcManager.get_inst()
+        watch_paths, ignored_paths, ignored_globs = mgr.resolve_input_watch_paths(proc)
+
+        self.assertIn(os.path.join(self._tmpdir, 'src'), watch_paths)
+        self.assertEqual(ignored_paths, [])
+        self.assertIn(os.path.join(self._tmpdir, 'src', 'vendor', '**'), ignored_globs)
+
     def test_watcher_collapses_nested_watch_directories(self) -> None:
         file_a = self._write_file('root/a.txt', 'a')
         file_b = self._write_file('root/nested/b.txt', 'b')
 
-        watcher = FileWatcher()
+        watcher = FileWatcher(watch_enabled=True)
         watcher.add_proc_inputs('a', [file_a])
         watcher.add_proc_inputs('b', [file_b])
 
@@ -654,7 +759,7 @@ class TestWatcherInternals(IncrementalBaseTest):
             def join(self) -> None:
                 return
 
-        watcher = FileWatcher()
+        watcher = FileWatcher(watch_enabled=True)
         watcher.add_proc_inputs('build', [src])
 
         with (

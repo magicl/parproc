@@ -42,6 +42,7 @@ from .types import (
     WhenScheduled,
     WhenTargetScheduled,
 )
+from .watcher import FileWatcher
 
 # pylint: disable=too-many-positional-arguments
 
@@ -135,7 +136,9 @@ class ProcManager:  # pylint: disable=too-many-public-methods
         self.allow_missing_deps = True
         self.task_db_path: str | None = None
         self.name_param_separator = '::'
+        self.watch = False
         self._full: bool = False
+        self._file_watcher = FileWatcher(watch_enabled=False)
 
     def clear(self):
         logger.debug('----------------CLEAR----------------------')
@@ -152,7 +155,9 @@ class ProcManager:  # pylint: disable=too-many-public-methods
         }
         self.missing_deps: dict[str, bool] = {}
         self.allow_missing_deps = True
+        self.watch = False
         self.pending_now = []  # Procs with now=True to be started on next _step
+        self._file_watcher = FileWatcher(watch_enabled=self.watch)
 
         if hasattr(self, 'term') and self.term is not None:
             self.term.clear()
@@ -176,6 +181,7 @@ class ProcManager:  # pylint: disable=too-many-public-methods
         allow_missing_deps: bool | None = None,
         task_db_path: str | None = _TASK_DB_PATH_UNSET,
         name_param_separator: str | None = None,
+        watch: bool | None = None,  # pylint: disable=redefined-outer-name
     ) -> None:
         """
         parallel: Number of parallel running processes
@@ -186,6 +192,7 @@ class ProcManager:  # pylint: disable=too-many-public-methods
         task_db_path: Path to SQLite DB for task run history (progress estimates). None to disable.
         name_param_separator: Separator between proto name and params (and between params). Default '::'.
           Param values may not contain this string. Patterns must use this separator between [param] placeholders.
+        watch: Enables watch mode support when set to True. ``watch()`` requires this to be enabled.
         """
         if parallel is not None:
             self.parallel = parallel
@@ -210,6 +217,9 @@ class ProcManager:  # pylint: disable=too-many-public-methods
             task_db.set_path(task_db_path)
         if name_param_separator is not None:
             self.name_param_separator = name_param_separator
+        if watch is not None:
+            self.watch = watch
+            self._file_watcher = FileWatcher(watch_enabled=watch)
 
     def set_params(self, **params: Any) -> None:
         for k, v in params.items():
@@ -705,6 +715,59 @@ class ProcManager:  # pylint: disable=too-many-public-methods
                 resolved.append(p)
         return resolved
 
+    def _resolve_watch_specs(self, specs: list[str | Callable[..., list[str]]], proc: 'Proc') -> list[str]:
+        """Resolve file specs to watch roots/paths (keep glob roots as directories)."""
+        raw_paths: list[str] = []
+        for spec in specs:
+            if isinstance(spec, str):
+                raw_paths.append(spec)
+            else:
+                dep_context = DepProcContext(
+                    proc_name=proc.name or '',
+                    params=self.context['params'],
+                    args=proc.args,
+                )
+                sig = inspect.signature(spec)
+                param_names = list(sig.parameters.keys())
+                if param_names:
+                    param_names = param_names[1:]
+                filtered = {k: v for k, v in proc.args.items() if k in param_names}
+                result = spec(dep_context, **filtered)
+                raw_paths.extend(result)
+
+        watch_paths: list[str] = []
+        for path in raw_paths:
+            if globmod.has_magic(path):
+                watch_paths.append(self._glob_root_for_pattern(path))
+            else:
+                watch_paths.append(path)
+        return watch_paths
+
+    @staticmethod
+    def _glob_root_for_pattern(path: str) -> str:
+        """Return non-glob prefix directory for a glob pattern."""
+        abs_path = os.path.abspath(path)
+        drive, tail = os.path.splitdrive(abs_path)
+        is_abs = tail.startswith(os.sep)
+        parts = [part for part in tail.split(os.sep) if part]
+
+        prefix: list[str] = []
+        for part in parts:
+            if globmod.has_magic(part):
+                break
+            prefix.append(part)
+
+        if not prefix:
+            base = os.sep if is_abs else '.'
+            return drive + base
+
+        root = os.sep.join(prefix)
+        if is_abs:
+            root = os.sep + root
+        if drive:
+            root = drive + root
+        return root
+
     @staticmethod
     def _is_subpath_or_equal(candidate: str, parent: str) -> bool:
         """Return True if candidate is parent or inside parent."""
@@ -733,8 +796,95 @@ class ProcManager:  # pylint: disable=too-many-public-methods
         resolved = self._resolve_file_specs(proc.inputs, proc)
         if proc.inputs_ignore is None:
             return resolved
-        ignored = self._resolve_file_specs(proc.inputs_ignore, proc)
-        return self._exclude_ignored_paths(resolved, ignored)
+        return self._exclude_ignored_specs(resolved, proc.inputs_ignore, proc)
+
+    def _exclude_ignored_specs(
+        self,
+        paths: list[str],
+        ignore_specs: list[str | Callable[..., list[str]]],
+        proc: 'Proc',
+    ) -> list[str]:
+        """Exclude paths from ignore specs without expanding ignore globs on disk."""
+        ignored_paths: list[str] = []
+        ignored_globs: list[str] = []
+
+        for spec in ignore_specs:
+            values: list[str]
+            if isinstance(spec, str):
+                values = [spec]
+            else:
+                dep_context = DepProcContext(
+                    proc_name=proc.name or '',
+                    params=self.context['params'],
+                    args=proc.args,
+                )
+                sig = inspect.signature(spec)
+                param_names = list(sig.parameters.keys())
+                if param_names:
+                    param_names = param_names[1:]
+                filtered_args = {k: v for k, v in proc.args.items() if k in param_names}
+                values = spec(dep_context, **filtered_args)
+
+            for value in values:
+                if globmod.has_magic(value):
+                    ignored_globs.append(os.path.abspath(value))
+                else:
+                    ignored_paths.append(value)
+
+        filtered_paths = self._exclude_ignored_paths(paths, ignored_paths)
+        if not ignored_globs:
+            return filtered_paths
+
+        kept: list[str] = []
+        for path in filtered_paths:
+            abs_path = os.path.abspath(path)
+            if any(
+                fnmatch.fnmatch(abs_path, pattern) or fnmatch.fnmatch(abs_path + os.sep, pattern)
+                for pattern in ignored_globs
+            ):
+                continue
+            kept.append(path)
+        return kept
+
+    def _resolve_input_watch_paths(self, proc: 'Proc') -> tuple[list[str], list[str], list[str]]:
+        """Resolve proc inputs to watch paths plus ignored paths/patterns."""
+        if proc.inputs is None:
+            return [], [], []
+        watch_paths = self._resolve_watch_specs(proc.inputs, proc)
+        if proc.inputs_ignore is None:
+            return watch_paths, [], []
+
+        ignored_watch_paths: list[str] = []
+        ignored_watch_globs: list[str] = []
+        for spec in proc.inputs_ignore:
+            values: list[str]
+            if isinstance(spec, str):
+                values = [spec]
+            else:
+                dep_context = DepProcContext(
+                    proc_name=proc.name or '',
+                    params=self.context['params'],
+                    args=proc.args,
+                )
+                sig = inspect.signature(spec)
+                param_names = list(sig.parameters.keys())
+                if param_names:
+                    param_names = param_names[1:]
+                filtered_args = {k: v for k, v in proc.args.items() if k in param_names}
+                values = spec(dep_context, **filtered_args)
+
+            for value in values:
+                if globmod.has_magic(value):
+                    ignored_watch_globs.append(os.path.abspath(value))
+                else:
+                    ignored_watch_paths.append(value)
+
+        kept_watch_paths = self._exclude_ignored_paths(watch_paths, ignored_watch_paths)
+        return kept_watch_paths, ignored_watch_paths, ignored_watch_globs
+
+    def resolve_input_watch_paths(self, proc: 'Proc') -> tuple[list[str], list[str], list[str]]:
+        """Resolve proc inputs to watch paths plus ignored paths/patterns."""
+        return self._resolve_input_watch_paths(proc)
 
     def _resolve_outputs(self, proc: 'Proc') -> list[str]:
         """Resolve output globs/callables to concrete file paths."""
@@ -742,25 +892,9 @@ class ProcManager:  # pylint: disable=too-many-public-methods
             return []
         return self._resolve_file_specs(proc.outputs, proc)
 
-    @staticmethod
-    def _compute_fingerprint(paths: list[str]) -> dict[str, float]:
-        """Map each path to its mtime_ns. Directories are walked recursively."""
-        result: dict[str, float] = {}
-        for p in paths:
-            if os.path.isdir(p):
-                for root, _dirs, files in os.walk(p):
-                    for fname in files:
-                        full = os.path.join(root, fname)
-                        try:
-                            result[full] = os.stat(full).st_mtime_ns
-                        except OSError:
-                            pass
-            else:
-                try:
-                    result[p] = os.stat(p).st_mtime_ns
-                except OSError:
-                    pass
-        return result
+    def _compute_fingerprint(self, paths: list[str], ignored_paths: list[str] | None = None) -> dict[str, float]:
+        """Map each path to mtime_ns via FileWatcher cache."""
+        return self._file_watcher.compute_fingerprint(paths, ignored_paths=ignored_paths)
 
     def _deps_changed_for_proc(self, proc: 'Proc') -> tuple[bool, list[str]]:
         """Check if any dependency proc produced fresh output (was not UP_TO_DATE or SKIPPED)."""
@@ -799,7 +933,7 @@ class ProcManager:  # pylint: disable=too-many-public-methods
         if proc.outputs is not None:
             resolved_outputs = self._resolve_outputs(proc)
             for out_path in resolved_outputs:
-                if not os.path.exists(out_path):
+                if not self._file_watcher.path_exists(out_path):
                     return True
 
         return False
@@ -826,7 +960,7 @@ class ProcManager:  # pylint: disable=too-many-public-methods
         resolved = self._resolve_outputs(proc)
         missing: list[str] = []
         for out_path in resolved:
-            if not os.path.exists(out_path):
+            if not self._file_watcher.path_exists(out_path):
                 missing.append(out_path)
         if missing:
             proc.state = ProcState.FAILED
@@ -2268,9 +2402,9 @@ def watch(*watch_names: str) -> None:  # pylint: disable=too-many-branches
     mark affected procs and their transitive dependents as dirty, reset their
     state to IDLE, and re-schedule/execute them. Repeats until interrupted.
     """
-    from .watcher import FileWatcher  # pylint: disable=import-outside-toplevel
-
     mgr = ProcManager.get_inst()
+    if not mgr.watch:
+        raise UserError('watch() requires set_options(watch=True) before calling run()/watch().')
 
     # Phase 1: let any work already scheduled (e.g. by run()) complete; do not set _full here
     mgr.wait_for_all(exception_on_failure=False)
@@ -2299,11 +2433,17 @@ def watch(*watch_names: str) -> None:  # pylint: disable=too-many-branches
         restart_set = [name for name in watch_names if name in mgr.procs]
 
     # Phase 2: watch loop
-    watcher = FileWatcher()
+    watcher = mgr._file_watcher  # pylint: disable=protected-access
+    watcher.clear_watched_procs()
     for proc_name, proc in mgr.procs.items():
         if proc_name in watch_set and proc.inputs is not None:
-            resolved = mgr._resolve_inputs(proc)  # pylint: disable=protected-access
-            watcher.add_proc_inputs(proc_name, resolved)
+            watch_paths, ignored_paths, ignored_globs = mgr.resolve_input_watch_paths(proc)
+            watcher.add_proc_inputs(
+                proc_name,
+                watch_paths,
+                ignored_paths=ignored_paths,
+                ignored_globs=ignored_globs,
+            )
 
     watcher.start()
     try:
