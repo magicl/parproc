@@ -2,13 +2,17 @@
 
 # pylint: disable=unused-argument
 
+import errno
 import os
 import tempfile
 import time
 import unittest
+from typing import Any
+from unittest.mock import patch
 
 import parproc as pp
 from parproc.types import ProcState
+from parproc.watcher import FileWatcher
 
 
 def _test_mode() -> str:
@@ -508,6 +512,159 @@ class TestGeneration(IncrementalBaseTest):
         procs = pp.get_procs()
         self.assertEqual(procs['A'].completed_generation, 0)
         self.assertEqual(procs['A'].generation, 0)
+
+
+class TestWatch(IncrementalBaseTest):
+    """Tests for watch-mode target selection."""
+
+    def test_watch_includes_transitive_dependencies_of_explicit_targets(self) -> None:
+        src = self._write_file('src.txt', 'v1')
+
+        @pp.Proto(name='build', inputs=[src])
+        def build(ctx: pp.ProcContext) -> str:
+            return 'build'
+
+        @pp.Proto(name='test', deps=['build'])
+        def test_proc(ctx: pp.ProcContext) -> str:
+            return 'test'
+
+        @pp.Proto(name='deploy', deps=['test'])
+        def deploy(ctx: pp.ProcContext) -> str:
+            return 'deploy'
+
+        pp.run('deploy')
+        pp.wait_for_all()
+
+        watched_inputs: dict[str, list[str]] = {}
+
+        class _FakeFileWatcher:
+            def add_proc_inputs(self, proc_name: str, paths: list[str]) -> None:
+                watched_inputs[proc_name] = list(paths)
+
+            def start(self) -> None:
+                return
+
+            def wait_for_changes(self, timeout: float | None = None) -> set[str]:
+                del timeout
+                raise KeyboardInterrupt
+
+            def stop(self) -> None:
+                return
+
+        with patch('parproc.watcher.FileWatcher', _FakeFileWatcher):
+            pp.watch('deploy')
+
+        self.assertIn('build', watched_inputs)
+        self.assertEqual(watched_inputs['build'], [src])
+
+    def test_watch_does_not_schedule_unrelated_idle_procs(self) -> None:
+        src = self._write_file('src.txt', 'v1')
+
+        @pp.Proto(name='build', inputs=[src])
+        def build(ctx: pp.ProcContext) -> str:
+            self._increment_counter()
+            return 'build'
+
+        @pp.Proto(name='deploy', deps=['build'])
+        def deploy(ctx: pp.ProcContext) -> str:
+            del ctx
+            return 'deploy'
+
+        @pp.Proto(name='unrelated')
+        def unrelated(ctx: pp.ProcContext) -> str:
+            del ctx
+            return 'unrelated'
+
+        self._reset_counter()
+        pp.run('deploy')
+        pp.wait_for_all()
+        self.assertEqual(self._read_counter(), 1)
+        watched_src = src
+
+        class _FakeFileWatcher:
+            def __init__(self) -> None:
+                self._calls = 0
+
+            def add_proc_inputs(self, proc_name: str, paths: list[str]) -> None:
+                del proc_name, paths
+
+            def start(self) -> None:
+                return
+
+            def wait_for_changes(self, timeout: float | None = None) -> set[str]:
+                del timeout
+                self._calls += 1
+                if self._calls == 1:
+                    time.sleep(0.05)
+                    with open(watched_src, 'w', encoding='utf-8') as f:
+                        f.write('v2')
+                    return {'build'}
+                raise KeyboardInterrupt
+
+            def stop(self) -> None:
+                return
+
+        with patch('parproc.watcher.FileWatcher', _FakeFileWatcher):
+            pp.watch('deploy')
+
+        self.assertEqual(self._read_counter(), 2)
+
+
+class TestWatcherInternals(IncrementalBaseTest):
+    """Unit tests for watcher directory selection and fallback behavior."""
+
+    def test_watcher_collapses_nested_watch_directories(self) -> None:
+        file_a = self._write_file('root/a.txt', 'a')
+        file_b = self._write_file('root/nested/b.txt', 'b')
+
+        watcher = FileWatcher()
+        watcher.add_proc_inputs('a', [file_a])
+        watcher.add_proc_inputs('b', [file_b])
+
+        watch_dirs = watcher._compute_watch_dirs(watcher._path_to_procs.keys())  # pylint: disable=protected-access
+
+        self.assertEqual(watch_dirs, [os.path.join(self._tmpdir, 'root')])
+
+    def test_watcher_falls_back_to_polling_when_inotify_instances_exhausted(self) -> None:
+        src = self._write_file('inputs/src.txt', 'v1')
+        scheduled: list[str] = []
+
+        class _FailingObserver:
+            def schedule(self, handler: Any, path: str, recursive: bool = False) -> None:
+                del handler, recursive
+                scheduled.append(path)
+
+            def start(self) -> None:
+                raise OSError(errno.EMFILE, 'inotify instance limit reached')
+
+        class _FakePollingObserver:
+            def __init__(self) -> None:
+                self.started = False
+
+            def schedule(self, handler: Any, path: str, recursive: bool = False) -> None:
+                del handler, recursive
+                scheduled.append(path)
+
+            def start(self) -> None:
+                self.started = True
+
+            def stop(self) -> None:
+                return
+
+            def join(self) -> None:
+                return
+
+        watcher = FileWatcher()
+        watcher.add_proc_inputs('build', [src])
+
+        with (
+            patch('parproc.watcher.Observer', _FailingObserver),
+            patch('parproc.watcher.PollingObserver', _FakePollingObserver),
+        ):
+            watcher.start()
+
+        self.assertIsInstance(watcher._observer, _FakePollingObserver)  # pylint: disable=protected-access
+        self.assertEqual(scheduled.count(os.path.join(self._tmpdir, 'inputs')), 2)
 
 
 if __name__ == '__main__':

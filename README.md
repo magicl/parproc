@@ -402,6 +402,8 @@ Or watch only specific procs:
 pp.watch('build::prod', 'test::prod')
 ```
 
+When explicit proc names are provided, watch mode also watches the declared inputs of their transitive dependencies (as resolved from the initial run graph).
+
 Watch mode uses the `watchdog` package to detect file changes (it is a core dependency of parproc).
 
 ### How watch mode handles re-runs

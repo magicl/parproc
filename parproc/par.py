@@ -2247,8 +2247,28 @@ def watch(*watch_names: str) -> None:  # pylint: disable=too-many-branches
     # Phase 1: let any work already scheduled (e.g. by run()) complete; do not set _full here
     mgr.wait_for_all(exception_on_failure=False)
 
-    # Determine which procs to watch
-    watch_set = set(watch_names) if watch_names else set(mgr.procs.keys())
+    # Determine which procs to watch. For explicit names, include transitive
+    # dependencies so changes in their inputs can trigger a rebuild.
+    if watch_names:
+        watch_set: set[str] = set()
+        queue = list(watch_names)
+        while queue:
+            current = queue.pop(0)
+            if current in watch_set or current not in mgr.procs:
+                continue
+            watch_set.add(current)
+            for dep in mgr.procs[current].deps:
+                if isinstance(dep, str):
+                    queue.append(dep)
+    else:
+        watch_set = set(mgr.procs.keys())
+
+    # Keep a fixed restart set based on the graph that was already scheduled/run
+    # before entering watch mode. This avoids accidentally scheduling unrelated
+    # procs that happen to still be IDLE.
+    restart_set = [name for name, proc in mgr.procs.items() if proc.state != ProcState.IDLE]
+    if not restart_set and watch_names:
+        restart_set = [name for name in watch_names if name in mgr.procs]
 
     # Phase 2: watch loop
     watcher = FileWatcher()
@@ -2277,10 +2297,9 @@ def watch(*watch_names: str) -> None:  # pylint: disable=too-many-branches
                     proc.output = None
                     proc.process = None
 
-            # Re-start the procs that were originally scheduled
-            originally_wanted = [pn for pn, p in mgr.procs.items() if p.state == ProcState.IDLE]
-            if originally_wanted:
-                mgr.start_proc(*originally_wanted)
+            # Re-start only the procs that belonged to the original scheduled graph.
+            if restart_set:
+                mgr.start_proc(*restart_set)
                 mgr.wait_for_all(exception_on_failure=False)
     except KeyboardInterrupt:
         pass
