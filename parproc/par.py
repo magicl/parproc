@@ -916,6 +916,16 @@ class ProcManager:  # pylint: disable=too-many-public-methods
         if self.task_db_path is None:
             return True
 
+        # Auto-skip only makes sense when we have at least one input source
+        # (dependency proc and/or resolved file input) to assess staleness from.
+        has_dep_inputs = any(isinstance(dep, str) for dep in proc.deps)
+        resolved_inputs: list[str] = []
+        if proc.inputs is not None:
+            resolved_inputs = self._resolve_inputs(proc)
+        has_file_inputs = len(resolved_inputs) > 0
+        if not has_dep_inputs and not has_file_inputs:
+            return True
+
         deps_changed, _ = self._deps_changed_for_proc(proc)
         if deps_changed:
             return True
@@ -924,8 +934,7 @@ class ProcManager:  # pylint: disable=too-many-public-methods
         if cached is None:
             return True
 
-        if proc.inputs is not None:
-            resolved_inputs = self._resolve_inputs(proc)
+        if has_file_inputs:
             current_fp = self._compute_fingerprint(resolved_inputs)
             if current_fp != cached.input_fingerprint:
                 return True

@@ -193,6 +193,30 @@ class TestNoSkip(IncrementalBaseTest):
 class TestAutoSkipWithoutInputs(IncrementalBaseTest):
     """Test that procs without inputs are auto-skipped when deps are UP_TO_DATE and cached result exists."""
 
+    def test_proc_with_no_deps_and_no_inputs_never_auto_skips(self) -> None:
+        @pp.Proto(name='deploy')
+        def deploy(ctx: pp.ProcContext) -> str:
+            del ctx
+            return 'deployed_v1'
+
+        pp.run('deploy')
+        pp.wait_for_all()
+        self.assertEqual(pp.results()['deploy'], 'deployed_v1')
+
+        pp.clear()
+        pp.set_options(mode=_test_mode(), dynamic=False, task_db_path=self._db_path)
+
+        @pp.Proto(name='deploy')
+        def deploy2(ctx: pp.ProcContext) -> str:
+            del ctx
+            return 'deployed_v2'
+
+        pp.run('deploy')
+        pp.wait_for_all()
+        procs = pp.get_procs()
+        self.assertEqual(procs['deploy'].state, ProcState.SUCCEEDED)
+        self.assertEqual(pp.results()['deploy'], 'deployed_v2')
+
     def test_skips_when_deps_up_to_date(self) -> None:
         src = self._write_file('src.txt', 'v1')
 
