@@ -1,5 +1,6 @@
 import datetime
 import fnmatch
+import glob as globmod
 import inspect
 import itertools
 import logging
@@ -133,6 +134,7 @@ class ProcManager:  # pylint: disable=too-many-public-methods
         self.allow_missing_deps = True
         self.task_db_path: str | None = None
         self.name_param_separator = '::'
+        self._full: bool = False
 
     def clear(self):
         logger.debug('----------------CLEAR----------------------')
@@ -667,6 +669,176 @@ class ProcManager:  # pylint: disable=too-many-public-methods
                     f'(wave {proc.wave}). Dependencies must have equal or lower wave number to avoid deadlock.'
                 )
 
+    # --- Incremental / staleness logic ---
+
+    def _resolve_file_specs(self, specs: list[str | Callable[..., list[str]]], proc: 'Proc') -> list[str]:
+        """Resolve a list of file specs (strings or callables) to concrete paths.
+
+        Callables receive DepProcContext + filtered args (same convention as dep lambdas).
+        Glob patterns (e.g. ``src/**/*.ts``) are expanded to matching files.
+        """
+        raw_paths: list[str] = []
+        for spec in specs:
+            if isinstance(spec, str):
+                raw_paths.append(spec)
+            else:
+                dep_context = DepProcContext(
+                    proc_name=proc.name or '',
+                    params=self.context['params'],
+                    args=proc.args,
+                )
+                sig = inspect.signature(spec)
+                param_names = list(sig.parameters.keys())
+                if param_names:
+                    param_names = param_names[1:]
+                filtered = {k: v for k, v in proc.args.items() if k in param_names}
+                result = spec(dep_context, **filtered)
+                raw_paths.extend(result)
+
+        resolved: list[str] = []
+        for p in raw_paths:
+            if '*' in p or '?' in p or '[' in p:
+                resolved.extend(sorted(globmod.glob(p, recursive=True)))
+            else:
+                resolved.append(p)
+        return resolved
+
+    def _resolve_inputs(self, proc: 'Proc') -> list[str]:
+        """Resolve input globs/callables to concrete file paths."""
+        if proc.inputs is None:
+            return []
+        return self._resolve_file_specs(proc.inputs, proc)
+
+    def _resolve_outputs(self, proc: 'Proc') -> list[str]:
+        """Resolve output globs/callables to concrete file paths."""
+        if proc.outputs is None:
+            return []
+        return self._resolve_file_specs(proc.outputs, proc)
+
+    @staticmethod
+    def _compute_fingerprint(paths: list[str]) -> dict[str, float]:
+        """Map each path to its mtime_ns. Directories are walked recursively."""
+        result: dict[str, float] = {}
+        for p in paths:
+            if os.path.isdir(p):
+                for root, _dirs, files in os.walk(p):
+                    for fname in files:
+                        full = os.path.join(root, fname)
+                        try:
+                            result[full] = os.stat(full).st_mtime_ns
+                        except OSError:
+                            pass
+            else:
+                try:
+                    result[p] = os.stat(p).st_mtime_ns
+                except OSError:
+                    pass
+        return result
+
+    def _deps_changed_for_proc(self, proc: 'Proc') -> tuple[bool, list[str]]:
+        """Check if any dependency proc produced fresh output (was not UP_TO_DATE or SKIPPED)."""
+        changed: list[str] = []
+        for d in proc.deps:
+            if not isinstance(d, str) or d not in self.procs:
+                continue
+            dep_state = self.procs[d].state
+            if dep_state not in (ProcState.UP_TO_DATE, ProcState.SKIPPED):
+                changed.append(d)
+        return (len(changed) > 0, changed)
+
+    def _is_proc_stale(self, proc: 'Proc') -> bool:
+        """Determine if proc needs to run (True=stale, False=fresh/UP_TO_DATE)."""
+        if self._full:
+            return True
+        if proc.no_skip:
+            return True
+        if self.task_db_path is None:
+            return True
+
+        deps_changed, _ = self._deps_changed_for_proc(proc)
+        if deps_changed:
+            return True
+
+        cached = task_db.load_result(proc.name or '')
+        if cached is None:
+            return True
+
+        if proc.inputs is not None:
+            resolved_inputs = self._resolve_inputs(proc)
+            current_fp = self._compute_fingerprint(resolved_inputs)
+            if current_fp != cached.input_fingerprint:
+                return True
+
+        if proc.outputs is not None:
+            resolved_outputs = self._resolve_outputs(proc)
+            for out_path in resolved_outputs:
+                if not os.path.exists(out_path):
+                    return True
+
+        return False
+
+    def _auto_skip_proc(self, proc: 'Proc') -> None:
+        """Skip proc as UP_TO_DATE: load cached result into context['results'], set state."""
+        cached = task_db.load_result(proc.name or '')
+        proc.state = ProcState.UP_TO_DATE
+        proc.error = Proc.ERROR_NONE
+        proc.output = cached.output if cached is not None else None
+        if proc.name is not None:
+            self.context['results'][proc.name] = proc.output
+        logger.info('proc "%s" auto-skipped (UP_TO_DATE)', proc.name)
+        self.term.completed_proc(proc)
+
+    def _verify_outputs(self, proc: 'Proc') -> bool:
+        """After proc runs, verify declared outputs were refreshed.
+
+        Returns True if ok. If outputs missing or not refreshed, marks proc
+        FAILED with ERROR_OUTPUTS_NOT_REFRESHED and returns False.
+        """
+        if proc.outputs is None:
+            return True
+        resolved = self._resolve_outputs(proc)
+        missing: list[str] = []
+        for out_path in resolved:
+            if not os.path.exists(out_path):
+                missing.append(out_path)
+        if missing:
+            proc.state = ProcState.FAILED
+            proc.error = Proc.ERROR_OUTPUTS_NOT_REFRESHED
+            proc.more_info = f'outputs not refreshed: {", ".join(missing)}'
+            logger.warning('proc "%s": declared outputs not refreshed: %s', proc.name, missing)
+            return False
+        return True
+
+    def _save_proc_result(self, proc: 'Proc') -> None:
+        """Cache a proc's output and input fingerprint in the task DB."""
+        if self.task_db_path is None:
+            return
+        fingerprint: dict[str, float] = {}
+        if proc.inputs is not None:
+            resolved_inputs = self._resolve_inputs(proc)
+            fingerprint = self._compute_fingerprint(resolved_inputs)
+        task_db.save_result(proc.name or '', proc.output, fingerprint)
+
+    def _mark_dirty(self, *proc_names: str) -> None:
+        """Mark procs and all transitive dependents as dirty (increment generation)."""
+        dirty: set[str] = set(proc_names)
+        queue = list(proc_names)
+        while queue:
+            name = queue.pop(0)
+            for other_name, other_proc in self.procs.items():
+                if other_name in dirty:
+                    continue
+                for d in other_proc.deps:
+                    if isinstance(d, str) and d == name:
+                        dirty.add(other_name)
+                        queue.append(other_name)
+                        break
+        for name in dirty:
+            if name in self.procs:
+                self.procs[name].generation += 1
+
+    # --- End incremental / staleness logic ---
+
     # Schedules one or more procs for execution
     def start_proc(self, *names: str) -> None:
         # Two-pass approach: first set all procs to WANTED and resolve rdeps,
@@ -1165,6 +1337,9 @@ class ProcManager:  # pylint: disable=too-many-public-methods
             timeout=proto.timeout,
             wave=proto.wave,
             special_deps=special_deps,
+            inputs=proto.inputs,
+            outputs=proto.outputs,
+            no_skip=proto.no_skip,
         )
         proc(proto.func)
         return proc_name
@@ -1418,6 +1593,17 @@ class ProcManager:  # pylint: disable=too-many-public-methods
         return False
 
     def execute(self, proc: 'Proc') -> None:
+        if not self._is_proc_stale(proc):
+            self._auto_skip_proc(proc)
+            return
+        # Populate incremental info in context so ProcContext has it (mp and single mode)
+        deps_changed, changed_deps = self._deps_changed_for_proc(proc)
+        self.context['deps_changed'] = deps_changed
+        self.context['changed_deps'] = changed_deps
+        if proc.inputs is not None:
+            self.context['input_fingerprint'] = self._compute_fingerprint(self._resolve_inputs(proc))
+        else:
+            self.context['input_fingerprint'] = None
         self.runner.start_task(self, proc)
 
     # Finds any procs that have completed their execution, and moves them on. Tries to execute other
@@ -1513,6 +1699,14 @@ class ProcManager:  # pylint: disable=too-many-public-methods
         """Build ProcContext for a task (used by runners)."""
         if proc.name is None:
             raise UserError('Proc has no name')
+        deps_changed, changed_deps = self._deps_changed_for_proc(proc)
+        context['deps_changed'] = deps_changed
+        context['changed_deps'] = changed_deps
+        if proc.inputs is not None:
+            resolved_inputs = self._resolve_inputs(proc)
+            context['input_fingerprint'] = self._compute_fingerprint(resolved_inputs)
+        else:
+            context['input_fingerprint'] = None
         return ProcContext(proc.name, context, queue_to_proc, queue_to_master)
 
     def run_task(
@@ -1592,6 +1786,13 @@ class ProcManager:  # pylint: disable=too-many-public-methods
         p.log_filename = log_filename
         if more_info is not None:
             p.more_info = more_info
+
+        # Verify declared outputs were refreshed (only if proc succeeded)
+        if p.state in (ProcState.SUCCEEDED,) and p.outputs is not None:
+            if not self._verify_outputs(p):
+                # _verify_outputs already set state to FAILED
+                pass
+
         logger.info(f'proc "{p.name}" collected: ret = {p.output}')
         self.context['results'][p.name] = p.output
         logger.info(f'new context: {self.context}')
@@ -1602,6 +1803,12 @@ class ProcManager:  # pylint: disable=too-many-public-methods
                 "success" if p.state in SUCCEEDED_STATES else ("timeout" if p.error == Proc.ERROR_TIMEOUT else "failed")
             )
             task_db.on_task_end(p.run_id, datetime.datetime.now(datetime.UTC), status)
+
+        # Cache result for incremental builds (only on success/skipped)
+        if p.state in SUCCEEDED_STATES:
+            self._save_proc_result(p)
+            p.completed_generation = p.generation
+
         self.term.end_proc(p)
 
 
@@ -1754,6 +1961,9 @@ class Proto:
         timeout: float | None = None,
         wave: int = 0,
         arg_choices: dict[str, Sequence[Any]] | Callable[..., dict[str, Sequence[Any]]] | None = None,
+        inputs: list[str | Callable[..., list[str]]] | None = None,
+        outputs: list[str | Callable[..., list[str]]] | None = None,
+        no_skip: bool = False,
     ):
         # Input properties
         self.name = name
@@ -1784,6 +1994,9 @@ class Proto:
             self.arg_choices = dict(arg_choices)
         # special_deps are stored inside deps; extracted when resolving
         self.special_deps: list[SpecialDep] = [d for d in _deps if isinstance(d, SpecialDep)]
+        self.inputs = [inputs] if callable(inputs) else inputs
+        self.outputs = [outputs] if callable(outputs) else outputs
+        self.no_skip = no_skip
 
         # Initialize regex attributes (will be set in _build_regex_pattern)
         self.regex_pattern: re.Pattern[str] | None = None
@@ -1944,14 +2157,84 @@ def create(proto_name: str, proc_name: str | None = None, **kwargs: Any) -> list
     return ProcManager.get_inst().create_proc(proto_name, proc_name)
 
 
-def run(proto_name: str, proc_name: str | None = None, **kwargs: Any) -> None:
-    """Create and start proc(s). When using glob with arg_choices, starts all matching procs."""
+def run(proto_name: str, proc_name: str | None = None, *, full: bool = False, **kwargs: Any) -> None:
+    """Create and start proc(s). When using glob with arg_choices, starts all matching procs.
+
+    Args:
+        full: If True, force all procs to run regardless of staleness (disables incremental skip).
+              If False (default), procs that are up-to-date are auto-skipped.
+    """
+    mgr = ProcManager.get_inst()
+    mgr._full = full  # pylint: disable=protected-access
     if kwargs:
         proto_name = _fill_proto_pattern(proto_name, kwargs)
         proc_name = None
-    names = ProcManager.get_inst().create_proc(proto_name, proc_name)
+    names = mgr.create_proc(proto_name, proc_name)
     if names:
-        ProcManager.get_inst().start_proc(*names)
+        mgr.start_proc(*names)
+
+
+def watch(*watch_names: str, full: bool = False) -> None:  # pylint: disable=too-many-branches
+    """Watch mode: run incrementally, then watch for input file changes and re-run dirty procs.
+
+    Blocks until interrupted (Ctrl+C).
+
+    Args:
+        watch_names: Proc names to watch.  If empty, watches all procs that have inputs.
+        full: If True, force all procs to run on the initial pass.
+
+    Phase 1: Incremental run (or full if ``full=True``).
+    Phase 2: Start FileWatcher, block waiting for changes. When changes detected,
+    mark affected procs and their transitive dependents as dirty, reset their
+    state to IDLE, and re-schedule/execute them. Repeats until interrupted.
+    """
+    from .watcher import FileWatcher  # pylint: disable=import-outside-toplevel
+
+    mgr = ProcManager.get_inst()
+    mgr._full = full  # pylint: disable=protected-access
+
+    # Phase 1: initial run
+    mgr.wait_for_all(exception_on_failure=False)
+
+    # Determine which procs to watch
+    watch_set = set(watch_names) if watch_names else set(mgr.procs.keys())
+
+    # Phase 2: watch loop
+    watcher = FileWatcher()
+    for proc_name, proc in mgr.procs.items():
+        if proc_name in watch_set and proc.inputs is not None:
+            resolved = mgr._resolve_inputs(proc)  # pylint: disable=protected-access
+            watcher.add_proc_inputs(proc_name, resolved)
+
+    watcher.start()
+    try:
+        while True:
+            dirty_procs = watcher.wait_for_changes(timeout=1.0)
+            if not dirty_procs:
+                continue
+
+            logger.info('Watch: dirty procs detected: %s', dirty_procs)
+            mgr._full = False  # pylint: disable=protected-access
+            mgr._mark_dirty(*dirty_procs)  # pylint: disable=protected-access
+
+            # Reset dirty procs to IDLE so they can be re-scheduled
+            for proc_name, proc in mgr.procs.items():
+                if proc.generation > proc.completed_generation:
+                    proc.state = ProcState.IDLE
+                    proc.error = Proc.ERROR_NONE
+                    proc.more_info = ''
+                    proc.output = None
+                    proc.process = None
+
+            # Re-start the procs that were originally scheduled
+            originally_wanted = [pn for pn, p in mgr.procs.items() if p.state == ProcState.IDLE]
+            if originally_wanted:
+                mgr.start_proc(*originally_wanted)
+                mgr.wait_for_all(exception_on_failure=False)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        watcher.stop()
 
 
 def set_options(**kwargs: Any) -> None:

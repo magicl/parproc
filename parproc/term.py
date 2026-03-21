@@ -65,6 +65,8 @@ def _get_error_type_message(disp: Displayable) -> str:
     """Short message for error type when task failed; empty when succeeded."""
     if disp.proc.state == ProcState.SKIPPED:
         return " skipped"
+    if disp.proc.state == ProcState.UP_TO_DATE:
+        return " up-to-date"
     if disp.proc.state in SUCCEEDED_STATES:
         return ""
     if disp.proc.state == ProcState.FAILED_DEP:
@@ -79,12 +81,16 @@ def _get_error_type_message(disp: Displayable) -> str:
         return " failed"
     if err == Proc.ERROR_NOT_PICKLEABLE:
         return " not pickleable"
+    if err == Proc.ERROR_OUTPUTS_NOT_REFRESHED:
+        return " outputs not refreshed"
     return " failed"
 
 
 def _format_completed_line_markup(disp: Displayable) -> str:
     """Return markup string for one completed task line (for live area or print)."""
-    if disp.proc.state == ProcState.SKIPPED:
+    if disp.proc.state == ProcState.UP_TO_DATE:
+        status = "[bold cyan]⊘[/bold cyan]"  # up-to-date (auto-skipped)
+    elif disp.proc.state == ProcState.SKIPPED:
         status = "[bold yellow]⊘[/bold yellow]"  # skipped
     elif disp.proc.state == ProcState.SUCCEEDED:
         status = "[bold green]✓[/bold green]"
@@ -204,9 +210,9 @@ class Term:
         return Group(*parts)
 
     def _print_completed_task_log_panels(self, disps: list[Displayable]) -> None:
-        """Print log panels for displayables that have chunks (failed task output). Skipped tasks get no panel."""
+        """Print log panels for displayables that have chunks (failed task output). Skipped/up-to-date tasks get no panel."""
         for disp in disps:
-            if disp.proc.state == ProcState.SKIPPED:
+            if disp.proc.state in (ProcState.SKIPPED, ProcState.UP_TO_DATE):
                 continue
             panel = self._log_panel_for_disp(disp)
             if panel is not None:
@@ -218,7 +224,9 @@ class Term:
 
     def _render_proc_static(self, disp: Displayable) -> None:
         """Render a process in static (non-dynamic) mode."""
-        if disp.proc.state == ProcState.SKIPPED:
+        if disp.proc.state == ProcState.UP_TO_DATE:
+            status = "[bold cyan]⊘[/bold cyan]"  # up-to-date
+        elif disp.proc.state == ProcState.SKIPPED:
             status = "[bold yellow]⊘[/bold yellow]"  # skipped
         elif disp.proc.state == ProcState.SUCCEEDED:
             status = "[bold green]✓[/bold green]"

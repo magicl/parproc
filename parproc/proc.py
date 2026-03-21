@@ -44,6 +44,9 @@ class ProcContext:
         self.args = context['args']
         self.queue_to_proc = queue_to_proc
         self.queue_to_master = queue_to_master
+        self.deps_changed: bool = context.get('deps_changed', False)
+        self.changed_deps: list[str] = context.get('changed_deps', [])
+        self.input_fingerprint: dict[str, float] | None = context.get('input_fingerprint')
 
     def _cmd(self, **kwargs: Any) -> Any:
         self.queue_to_master.put(kwargs)
@@ -111,6 +114,7 @@ class Proc:
     ERROR_NOT_PICKLEABLE = 4
     ERROR_FAILED = 5  # Proc raised ProcFailedError
     ERROR_SKIPPED = 6  # Proc raised ProcSkippedError
+    ERROR_OUTPUTS_NOT_REFRESHED = 7  # Declared outputs were not created/refreshed by the proc
 
     def __init__(
         self,
@@ -126,6 +130,9 @@ class Proc:
         timeout: float | None = None,
         wave: int = 0,
         special_deps: list[SpecialDep] | None = None,
+        inputs: list[str | Callable[..., list[str]]] | None = None,
+        outputs: list[str | Callable[..., list[str]]] | None = None,
+        no_skip: bool = False,
     ):
         if special_deps is not None:
             self.deps = deps if deps is not None else []
@@ -145,6 +152,9 @@ class Proc:
         self.proto = proto
         self.timeout = timeout
         self.wave = proto.wave if proto is not None else wave
+        self.inputs = [inputs] if callable(inputs) else inputs
+        self.outputs = [outputs] if callable(outputs) else outputs
+        self.no_skip = no_skip
         self.log_filename = ''
         import uuid  # pylint: disable=import-outside-toplevel
 
@@ -160,6 +170,8 @@ class Proc:
         self.error = Proc.ERROR_NONE
         self.more_info = ''
         self.output: Any = None
+        self.generation: int = 0
+        self.completed_generation: int = 0
         if f is not None:
             self.__call__(f)
 

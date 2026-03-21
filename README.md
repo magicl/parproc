@@ -115,6 +115,7 @@ Every proc goes through a state machine:
 IDLE  -->  WANTED  -->  RUNNING  -->  SUCCEEDED
                                  \->  FAILED
                                  \->  SKIPPED
+                                 \->  UP_TO_DATE
 ```
 
 - **IDLE** -- defined but not yet scheduled. Will not run until something triggers it.
@@ -123,6 +124,7 @@ IDLE  -->  WANTED  -->  RUNNING  -->  SUCCEEDED
 - **SUCCEEDED** -- completed successfully.
 - **FAILED** -- completed with an error (exception, timeout, dep failure, etc.).
 - **SKIPPED** -- the proc raised `ProcSkippedError`; counts as success for downstream deps.
+- **UP_TO_DATE** -- auto-skipped by the framework because all inputs and dependencies are unchanged since the last cached result. Counts as success for downstream deps. See [Incremental builds](#incremental-builds) below.
 
 ## Scheduling and execution
 
@@ -289,6 +291,9 @@ Every proc function receives a `ProcContext` as its first argument. It provides:
 - `context.args` -- arguments specific to this proc (from the proto pattern).
 - `context.proc_name` -- the name of the current proc.
 - `context.create(...)` / `context.start(...)` / `context.run(...)` / `context.wait(...)` -- create, start, run, or wait for other procs from within a running proc.
+- `context.deps_changed` -- `True` if any dependency proc was freshly executed (not `UP_TO_DATE` or `SKIPPED`). Useful for procs that want to do their own "should I do work?" logic.
+- `context.changed_deps` -- list of dependency names that were freshly executed.
+- `context.input_fingerprint` -- dict mapping resolved input file paths to their `mtime_ns` values, or `None` if no `inputs` are declared. Available for manual inspection.
 
 ## Options
 
@@ -301,8 +306,111 @@ pp.set_options(
     dynamic=True,                 # live terminal output (default: True if TTY)
     name_param_separator='::',    # separator between proto pattern segments
     allow_missing_deps=True,      # don't error on deps that don't exist yet
+    task_db_path='build/.parproc.db',  # SQLite DB for run history and result cache
 )
 ```
+
+Setting `task_db_path` enables two features: progress bar time estimates (based on historical run durations) and **incremental builds** (result caching so unchanged procs can be auto-skipped). The DB is safe to delete at any time -- losing it just means everything runs once to repopulate.
+
+
+## Incremental builds
+
+When `task_db_path` is set, parproc can automatically skip procs whose inputs haven't changed since their last successful run. This is the default behavior -- no extra configuration is needed.
+
+### How it works
+
+After a proc completes successfully, its return value and input file fingerprints (modification times) are cached in the task DB. On the next run, before executing a proc, the framework checks:
+
+1. Does a cached result exist?
+2. Are all dependency procs `UP_TO_DATE` or `SKIPPED` (i.e., none produced fresh output)?
+3. If the proc declares `inputs`: are all input file modification times unchanged?
+4. If the proc declares `outputs`: do all output files still exist?
+
+If all conditions are met, the proc is auto-skipped with state `UP_TO_DATE` and its cached return value is loaded into `results` so downstream procs can still access it.
+
+### Declaring file dependencies
+
+Use `inputs` and `outputs` to declare which files a proc reads and produces:
+
+```python
+@pp.Proto(
+    name='build::[target]',
+    deps=['generate-config'],
+    inputs=lambda ctx, target: [f'src/{target}/**/*.ts'],
+    outputs=lambda ctx, target: [f'dist/{target}/bundle.js'],
+)
+def build(ctx: pp.ProcContext, target: str) -> dict:
+    ...
+```
+
+- **`inputs`** -- file paths, glob patterns, or callables that return lists of paths. Used for staleness detection: if any input file is newer than the cached result, the proc re-runs. Glob patterns (e.g. `src/**/*.ts`) are expanded at check time.
+- **`outputs`** -- file paths the proc is expected to produce. After a proc runs, the framework verifies that all declared output files exist. If any are missing, the proc is marked **FAILED** with error `ERROR_OUTPUTS_NOT_REFRESHED`.
+
+Both accept a list of strings, a single callable, or a list mixing strings and callables. Callables receive the same `DepProcContext` and keyword args as dependency lambdas.
+
+### Incremental run vs full run
+
+`pp.run()` accepts a `full` keyword argument:
+
+```python
+pp.run('build::prod')              # incremental: skip up-to-date procs
+pp.run('build::prod', full=True)   # full: force all procs to run
+```
+
+### Opting out of auto-skip
+
+By default, all procs are eligible for auto-skipping. For side-effectful tasks (deployments, notifications, etc.), use `no_skip=True`:
+
+```python
+@pp.Proto(name='deploy::[env]', deps=['build::[env]'], no_skip=True)
+def deploy(ctx: pp.ProcContext, env: str) -> None:
+    ...  # always executes when scheduled, even if build was UP_TO_DATE
+```
+
+### Inspecting dependency changes from within a proc
+
+A running proc can check whether its dependencies actually produced new output:
+
+```python
+@pp.Proto(name='test', deps=['build'], no_skip=True)
+def test(ctx: pp.ProcContext) -> str:
+    if not ctx.deps_changed:
+        # All deps were UP_TO_DATE or SKIPPED -- nothing new to test
+        ...
+    print(f'Changed deps: {ctx.changed_deps}')
+    ...
+```
+
+### Resilience
+
+The task DB is purely an optimization. It is safe to delete it at any time. When the DB is missing or empty, every proc runs normally and the cache is rebuilt from scratch.
+
+
+## Watch mode
+
+Watch mode combines incremental builds with file system monitoring. After the initial run, it continuously watches declared `inputs` for changes and re-executes affected procs and their downstream dependents.
+
+```python
+pp.run('build::prod')
+pp.run('test::prod')
+pp.watch()  # blocks until Ctrl+C
+```
+
+Or watch only specific procs:
+
+```python
+pp.watch('build::prod', 'test::prod')
+```
+
+Watch mode requires the `watchdog` package (`pip install watchdog`). If not installed and `pp.watch()` is called, a `UserError` is raised with an install hint.
+
+### How watch mode handles re-runs
+
+Each proc tracks a `generation` counter. When an input file changes:
+
+1. The affected proc and all its transitive dependents are marked dirty (generation incremented).
+2. Dirty procs are reset to IDLE and re-scheduled.
+3. If a proc is currently running when its inputs change, downstream procs wait for the *next* execution to complete, not the currently running (stale) one.
 
 
 # Contributing

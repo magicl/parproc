@@ -4,12 +4,17 @@ Task database for recording run history and estimating expected duration.
 When task_db_path is set via set_options(), parproc records each task run
 (start/end/status) in an SQLite DB. The live view uses get_expected_duration()
 to show determinate progress bars when history exists.
+
+Also stores a result cache for incremental builds: cached proc outputs and
+input fingerprints so that unchanged procs can be auto-skipped.
 """
 
+import json
 import os
 import sqlite3
+from dataclasses import dataclass
 from datetime import datetime
-from typing import Optional
+from typing import Any, Optional
 
 # Module-level current DB; set by set_path(), used by par.py and term.py
 _current: Optional["TaskDB"] = None
@@ -66,6 +71,37 @@ def get_expected_duration(
     return _current.expected_duration(task_name, window=window, decay=decay, success_only=success_only)
 
 
+@dataclass
+class CachedResult:
+    """A cached proc result stored in the task DB."""
+
+    proc_name: str
+    output: Any
+    timestamp: float
+    input_fingerprint: dict[str, float]
+
+
+def save_result(proc_name: str, output: Any, input_fingerprint: dict[str, float]) -> None:
+    """Persist a proc's output and input fingerprint. No-op if no DB is set."""
+    if _current is None:
+        return
+    _current.save_cached_result(proc_name, output, input_fingerprint)
+
+
+def load_result(proc_name: str) -> CachedResult | None:
+    """Load a cached proc result. Returns None if not found or no DB is set."""
+    if _current is None:
+        return None
+    return _current.load_cached_result(proc_name)
+
+
+def clear_result(proc_name: str | None = None) -> None:
+    """Clear cached result(s). If proc_name is None, clear all. No-op if no DB is set."""
+    if _current is None:
+        return
+    _current.clear_cached_result(proc_name)
+
+
 class TaskDB:
     """SQLite-backed store of task runs (started_at, ended_at, status)."""
 
@@ -87,6 +123,16 @@ class TaskDB:
                 started_at TEXT NOT NULL,
                 ended_at TEXT,
                 status TEXT
+            )
+            """
+        )
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS result_cache (
+                proc_name TEXT PRIMARY KEY,
+                output_json TEXT NOT NULL,
+                timestamp REAL NOT NULL,
+                input_fingerprint TEXT NOT NULL
             )
             """
         )
@@ -121,6 +167,48 @@ class TaskDB:
             "UPDATE runs SET ended_at = ?, status = ? WHERE run_id = ?",
             (ended_str, status, run_id),
         )
+        self._conn.commit()
+
+    def save_cached_result(self, proc_name: str, output: Any, input_fingerprint: dict[str, float]) -> None:
+        if self._conn is None:
+            return
+        import time  # pylint: disable=import-outside-toplevel
+
+        output_json = json.dumps(output)
+        fingerprint_json = json.dumps(input_fingerprint)
+        self._conn.execute(
+            """
+            INSERT OR REPLACE INTO result_cache (proc_name, output_json, timestamp, input_fingerprint)
+            VALUES (?, ?, ?, ?)
+            """,
+            (proc_name, output_json, time.time(), fingerprint_json),
+        )
+        self._conn.commit()
+
+    def load_cached_result(self, proc_name: str) -> CachedResult | None:
+        if self._conn is None:
+            return None
+        cursor = self._conn.execute(
+            "SELECT output_json, timestamp, input_fingerprint FROM result_cache WHERE proc_name = ?",
+            (proc_name,),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            return None
+        output = json.loads(row[0])
+        timestamp: float = row[1]
+        input_fingerprint: dict[str, float] = json.loads(row[2])
+        return CachedResult(
+            proc_name=proc_name, output=output, timestamp=timestamp, input_fingerprint=input_fingerprint
+        )
+
+    def clear_cached_result(self, proc_name: str | None = None) -> None:
+        if self._conn is None:
+            return
+        if proc_name is None:
+            self._conn.execute("DELETE FROM result_cache")
+        else:
+            self._conn.execute("DELETE FROM result_cache WHERE proc_name = ?", (proc_name,))
         self._conn.commit()
 
     def expected_duration(
