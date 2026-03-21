@@ -62,13 +62,15 @@ def _has_ansi_color(text: str) -> bool:
 
 
 def _get_error_type_message(disp: Displayable) -> str:
-    """Short message for error type when task failed; empty when succeeded."""
+    """Short message for error type when task failed; empty when succeeded or still running."""
     if disp.proc.state == ProcState.SKIPPED:
         return " skipped"
     if disp.proc.state in SUCCEEDED_STATES:
         return ""
     if disp.proc.state == ProcState.FAILED_DEP:
         return " dependency failed"
+    if disp.proc.state not in FAILED_STATES:
+        return ""  # IDLE, WANTED, RUNNING: no error message
     # ProcState.FAILED with error code
     err = getattr(disp.proc, "error", None)
     if err == Proc.ERROR_TIMEOUT:
