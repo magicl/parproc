@@ -1,4 +1,3 @@
-#!/usr/bin/env python
 # pylint: disable=unused-argument
 
 """Watch-mode demo: two input-driven tasks and one that depends on both."""
