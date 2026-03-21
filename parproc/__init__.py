@@ -19,6 +19,7 @@ from .par import (
     wait,
     wait_clear,
     wait_for_all,
+    watch,
 )
 from .types import NO_FAILURES, RdepRule, WhenScheduled, WhenTargetScheduled
 
@@ -44,6 +45,7 @@ __all__ = [
     'run',
     'set_options',
     'wait',
+    'watch',
     'clear',
     'get_procs',
     'get_protos',

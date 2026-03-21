@@ -65,6 +65,8 @@ def _get_error_type_message(disp: Displayable) -> str:
     """Short message for error type when task failed; empty when succeeded or still running."""
     if disp.proc.state == ProcState.SKIPPED:
         return " skipped"
+    if disp.proc.state == ProcState.UP_TO_DATE:
+        return " up-to-date"
     if disp.proc.state in SUCCEEDED_STATES:
         return ""
     if disp.proc.state == ProcState.FAILED_DEP:
@@ -81,12 +83,16 @@ def _get_error_type_message(disp: Displayable) -> str:
         return " failed"
     if err == Proc.ERROR_NOT_PICKLEABLE:
         return " not pickleable"
+    if err == Proc.ERROR_OUTPUTS_NOT_REFRESHED:
+        return " outputs not refreshed"
     return " failed"
 
 
 def _format_completed_line_markup(disp: Displayable) -> str:
     """Return markup string for one completed task line (for live area or print)."""
-    if disp.proc.state == ProcState.SKIPPED:
+    if disp.proc.state == ProcState.UP_TO_DATE:
+        status = "[bold cyan]⊘[/bold cyan]"  # up-to-date (auto-skipped)
+    elif disp.proc.state == ProcState.SKIPPED:
         status = "[bold yellow]⊘[/bold yellow]"  # skipped
     elif disp.proc.state == ProcState.SUCCEEDED:
         status = "[bold green]✓[/bold green]"
@@ -206,9 +212,9 @@ class Term:
         return Group(*parts)
 
     def _print_completed_task_log_panels(self, disps: list[Displayable]) -> None:
-        """Print log panels for displayables that have chunks (failed task output). Skipped tasks get no panel."""
+        """Print log panels for displayables that have chunks (failed task output). Skipped/up-to-date tasks get no panel."""
         for disp in disps:
-            if disp.proc.state == ProcState.SKIPPED:
+            if disp.proc.state in (ProcState.SKIPPED, ProcState.UP_TO_DATE):
                 continue
             panel = self._log_panel_for_disp(disp)
             if panel is not None:
@@ -220,7 +226,9 @@ class Term:
 
     def _render_proc_static(self, disp: Displayable) -> None:
         """Render a process in static (non-dynamic) mode."""
-        if disp.proc.state == ProcState.SKIPPED:
+        if disp.proc.state == ProcState.UP_TO_DATE:
+            status = "[bold cyan]⊘[/bold cyan]"  # up-to-date
+        elif disp.proc.state == ProcState.SKIPPED:
             status = "[bold yellow]⊘[/bold yellow]"  # skipped
         elif disp.proc.state == ProcState.SUCCEEDED:
             status = "[bold green]✓[/bold green]"
@@ -359,6 +367,23 @@ class TermSimple(Term):
 class TermDynamic(Term):
     """Dynamic terminal display: live progress bars and in-place updates."""
 
+    def _start_live(self) -> None:
+        """Create and start a new Live display for the current progress state."""
+        self.live = Live(
+            self._render_display(),
+            refresh_per_second=10,
+            console=self.console,
+            vertical_overflow="visible",
+            transient=True,
+        )
+        self.live.start()
+
+    def _stop_live(self) -> None:
+        """Stop the Live display if running."""
+        if self.live is not None:
+            self.live.stop()
+            self.live = None
+
     def _ensure_progress(self) -> None:
         if self.progress is None:
             self.progress = Progress(
@@ -370,13 +395,7 @@ class TermDynamic(Term):
                 console=self.console,
                 transient=False,
             )
-            self.live = Live(
-                self._render_display(),
-                refresh_per_second=10,
-                console=self.console,
-                vertical_overflow="visible",
-            )
-            self.live.start()
+            self._start_live()
 
     def start_proc(self, p: Proc) -> None:
         disp = Displayable(p)
@@ -413,19 +432,14 @@ class TermDynamic(Term):
             disp.execution_time = ""
         if self.progress is not None and disp.task_id is not None:
             self.progress.remove_task(disp.task_id)
-        self.inactive.append(disp)
         del self.active[p]
-        if len(self.active) == 0:
-            # Last task: show completed lines and log panels (no progress bar), then stop
-            self.progress = None
-            if self.live is not None:
-                self.live.update(self._render_display())
-                self.live.stop()
-                self.live = None
-            self.inactive = []
-        else:
-            if self.live is not None:
-                self.live.update(self._render_display())
+        # Print completed task while Live is active. Rich's render hook
+        # atomically positions the text above the live area, so no
+        # blank-line artifacts from stop/restart cycles.
+        # Don't stop Live here even if active is empty -- more tasks may
+        # start (deps now met) before the next update() call. update()
+        # handles the final cleanup.
+        self._print_completed_task(disp)
 
     def update(self, force: bool = False) -> None:
         if force or time.time() - self.last_update > Term.updatePeriod:
@@ -448,16 +462,16 @@ class TermDynamic(Term):
                         else:
                             self.progress.update(disp.task_id, description=description, refresh=True)
             if self.live is not None:
-                self.live.update(self._render_display())
+                if len(self.active) > 0:
+                    self.live.update(self._render_display())
+                else:
+                    self.progress = None
+                    self._stop_live()
             elif len(self.active) > 0:
                 self._ensure_progress()
-            elif len(self.active) == 0:
-                self.progress = None
 
     def get_input(self, message: str, password: bool) -> str:
-        if self.live is not None:
-            self.live.stop()
-            self.live = None
+        self._stop_live()
         self.console.print(message)
         if password:
             result = getpass.getpass()
@@ -467,20 +481,12 @@ class TermDynamic(Term):
             if self.progress is None:
                 self._ensure_progress()
             else:
-                self.live = Live(
-                    self._render_display(),
-                    refresh_per_second=10,
-                    console=self.console,
-                    vertical_overflow="visible",
-                )
-                self.live.start()
+                self._start_live()
         return result
 
     def cleanup_on_interrupt(self) -> None:
         """Restore terminal state on SIGINT/SIGTERM: stop Live and show cursor."""
-        if self.live is not None:
-            self.live.stop()
-            self.live = None
+        self._stop_live()
         self.console.print(Control.show_cursor(True))
 
     def _render_display(self) -> Any:
