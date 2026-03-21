@@ -26,17 +26,27 @@ class _ChangeHandler(FileSystemEventHandler):
         super().__init__()
         self._path_to_procs = path_to_procs
         self._dirty: set[str] = set()
+        self._changed_items: set[str] = set()
         self._lock = lock
         self._event = threading.Event()
 
     def _handle(self, event: Any) -> None:
+        changed_paths: list[str] = []
         src = getattr(event, 'src_path', '')
-        if not isinstance(src, str):
+        if isinstance(src, str):
+            changed_paths.append(src)
+        dest = getattr(event, 'dest_path', '')
+        if isinstance(dest, str):
+            changed_paths.append(dest)
+        if not changed_paths:
             return
+
         with self._lock:
-            for watched_path, proc_names in self._path_to_procs.items():
-                if src == watched_path or src.startswith(watched_path + '/'):
-                    self._dirty.update(proc_names)
+            for changed_path in changed_paths:
+                for watched_path, proc_names in self._path_to_procs.items():
+                    if changed_path == watched_path or changed_path.startswith(watched_path + '/'):
+                        self._dirty.update(proc_names)
+                        self._changed_items.add(changed_path)
             if self._dirty:
                 self._event.set()
 
@@ -58,6 +68,15 @@ class _ChangeHandler(FileSystemEventHandler):
             self._dirty.clear()
             self._event.clear()
         return dirty
+
+    def drain_with_changes(self) -> tuple[set[str], set[str]]:
+        with self._lock:
+            dirty = self._dirty.copy()
+            changed_items = self._changed_items.copy()
+            self._dirty.clear()
+            self._changed_items.clear()
+            self._event.clear()
+        return dirty, changed_items
 
     def wait(self, timeout: float | None = None) -> None:
         self._event.wait(timeout=timeout)
@@ -140,11 +159,11 @@ class FileWatcher:
             self._observer.join()
             self._observer = None
 
-    def get_dirty_procs(self) -> set[str]:
-        """Return proc names whose inputs changed since last call, then clear."""
-        return self._handler.drain()
+    def get_dirty_procs(self) -> tuple[set[str], set[str]]:
+        """Return dirty proc names and changed items since last call, then clear."""
+        return self._handler.drain_with_changes()
 
-    def wait_for_changes(self, timeout: float | None = None) -> set[str]:
-        """Block until at least one input changes (or timeout). Return dirty proc names."""
+    def wait_for_changes(self, timeout: float | None = None) -> tuple[set[str], set[str]]:
+        """Block until at least one input changes (or timeout). Return dirty procs and changed items."""
         self._handler.wait(timeout=timeout)
-        return self._handler.drain()
+        return self._handler.drain_with_changes()

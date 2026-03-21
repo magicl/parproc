@@ -131,6 +131,7 @@ class Proc:
         wave: int = 0,
         special_deps: list[SpecialDep] | None = None,
         inputs: list[str | Callable[..., list[str]]] | None = None,
+        inputs_ignore: list[str | Callable[..., list[str]]] | None = None,
         outputs: list[str | Callable[..., list[str]]] | None = None,
         no_skip: bool = False,
     ):
@@ -153,6 +154,7 @@ class Proc:
         self.timeout = timeout
         self.wave = proto.wave if proto is not None else wave
         self.inputs = [inputs] if callable(inputs) else inputs
+        self.inputs_ignore = [inputs_ignore] if callable(inputs_ignore) else inputs_ignore
         self.outputs = [outputs] if callable(outputs) else outputs
         self.no_skip = no_skip
         self.log_filename = ''

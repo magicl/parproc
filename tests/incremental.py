@@ -544,7 +544,7 @@ class TestWatch(IncrementalBaseTest):
             def start(self) -> None:
                 return
 
-            def wait_for_changes(self, timeout: float | None = None) -> set[str]:
+            def wait_for_changes(self, timeout: float | None = None) -> tuple[set[str], set[str]]:
                 del timeout
                 raise KeyboardInterrupt
 
@@ -591,14 +591,14 @@ class TestWatch(IncrementalBaseTest):
             def start(self) -> None:
                 return
 
-            def wait_for_changes(self, timeout: float | None = None) -> set[str]:
+            def wait_for_changes(self, timeout: float | None = None) -> tuple[set[str], set[str]]:
                 del timeout
                 self._calls += 1
                 if self._calls == 1:
                     time.sleep(0.05)
                     with open(watched_src, 'w', encoding='utf-8') as f:
                         f.write('v2')
-                    return {'build'}
+                    return {'build'}, {watched_src}
                 raise KeyboardInterrupt
 
             def stop(self) -> None:

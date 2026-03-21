@@ -705,11 +705,36 @@ class ProcManager:  # pylint: disable=too-many-public-methods
                 resolved.append(p)
         return resolved
 
+    @staticmethod
+    def _is_subpath_or_equal(candidate: str, parent: str) -> bool:
+        """Return True if candidate is parent or inside parent."""
+        try:
+            return os.path.commonpath([candidate, parent]) == parent
+        except ValueError:
+            return False
+
+    def _exclude_ignored_paths(self, paths: list[str], ignored_paths: list[str]) -> list[str]:
+        """Exclude paths that match or are contained by any ignored path."""
+        if not ignored_paths:
+            return paths
+        ignored_abs = [os.path.abspath(p) for p in ignored_paths]
+        kept: list[str] = []
+        for path in paths:
+            path_abs = os.path.abspath(path)
+            if any(self._is_subpath_or_equal(path_abs, ign_abs) for ign_abs in ignored_abs):
+                continue
+            kept.append(path)
+        return kept
+
     def _resolve_inputs(self, proc: 'Proc') -> list[str]:
         """Resolve input globs/callables to concrete file paths."""
         if proc.inputs is None:
             return []
-        return self._resolve_file_specs(proc.inputs, proc)
+        resolved = self._resolve_file_specs(proc.inputs, proc)
+        if proc.inputs_ignore is None:
+            return resolved
+        ignored = self._resolve_file_specs(proc.inputs_ignore, proc)
+        return self._exclude_ignored_paths(resolved, ignored)
 
     def _resolve_outputs(self, proc: 'Proc') -> list[str]:
         """Resolve output globs/callables to concrete file paths."""
@@ -1340,6 +1365,7 @@ class ProcManager:  # pylint: disable=too-many-public-methods
             wave=proto.wave,
             special_deps=special_deps,
             inputs=proto.inputs,
+            inputs_ignore=proto.inputs_ignore,
             outputs=proto.outputs,
             no_skip=proto.no_skip,
         )
@@ -2010,6 +2036,7 @@ class Proto:
         wave: int = 0,
         arg_choices: dict[str, Sequence[Any]] | Callable[..., dict[str, Sequence[Any]]] | None = None,
         inputs: list[str | Callable[..., list[str]]] | None = None,
+        inputs_ignore: list[str | Callable[..., list[str]]] | None = None,
         outputs: list[str | Callable[..., list[str]]] | None = None,
         no_skip: bool = False,
     ):
@@ -2043,6 +2070,7 @@ class Proto:
         # special_deps are stored inside deps; extracted when resolving
         self.special_deps: list[SpecialDep] = [d for d in _deps if isinstance(d, SpecialDep)]
         self.inputs = [inputs] if callable(inputs) else inputs
+        self.inputs_ignore = [inputs_ignore] if callable(inputs_ignore) else inputs_ignore
         self.outputs = [outputs] if callable(outputs) else outputs
         self.no_skip = no_skip
 
@@ -2280,11 +2308,19 @@ def watch(*watch_names: str) -> None:  # pylint: disable=too-many-branches
     watcher.start()
     try:
         while True:
-            dirty_procs = watcher.wait_for_changes(timeout=1.0)
+            dirty_procs, changed_items = watcher.wait_for_changes(timeout=1.0)
             if not dirty_procs:
                 continue
 
             logger.info('Watch: dirty procs detected: %s', dirty_procs)
+            dirty_proc_lines = "\n".join(f"    {proc_name}" for proc_name in sorted(dirty_procs))
+            changed_item_lines = "\n".join(f"    {item}" for item in sorted(changed_items)) or "    (unknown)"
+            mgr.term.event(
+                f'Watch: detected changes in {len(dirty_procs)} proc(s); changes:\n'
+                f'{changed_item_lines}\n'
+                f'  rescheduling:\n'
+                f'{dirty_proc_lines}'
+            )
             mgr._full = False  # pylint: disable=protected-access
             mgr._mark_dirty(*dirty_procs)  # pylint: disable=protected-access
 

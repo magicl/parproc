@@ -159,6 +159,10 @@ class Term:
             return getpass.getpass()
         return sys.stdin.readline()
 
+    def event(self, message: str) -> None:
+        """Print a watch/runtime event line to console output."""
+        self.console.print(f'[bold cyan]![/bold cyan] {message}')
+
     def _get_description(self, proc: Proc) -> str:
         """Get description text for a process."""
         name = proc.name or ""
