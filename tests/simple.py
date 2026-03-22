@@ -2,7 +2,9 @@
 
 import logging
 import os
+import queue
 import sys
+import tempfile
 import time
 from typing import Any
 from unittest import TestCase
@@ -10,6 +12,8 @@ from unittest import TestCase
 from parameterized import parameterized  # pylint: disable=import-error
 
 import parproc as pp
+from parproc.runner import MultiProcessRunner
+from parproc.types import ProcState
 
 
 class SimpleTest(TestCase):
@@ -299,3 +303,92 @@ class SimpleTest(TestCase):
 
         # Proc ran once, not three times
         self.assertEqual(pp.results(), {'noop_target': 1})
+
+    def test_collect_marks_failed_when_child_exits_without_completion_message(self):
+        """If a child exits without proc-complete, collect() must fail it instead of hanging."""
+
+        class _QueueEmpty:
+            @staticmethod
+            def get_nowait():
+                raise queue.Empty
+
+            @staticmethod
+            def put(msg):
+                del msg
+
+        class _DeadProcess:
+            exitcode = 17
+
+            @staticmethod
+            def is_alive():
+                return False
+
+        class _FakeProc:
+            def __init__(self):
+                self.name = 'orphaned-child'
+                self.state = ProcState.RUNNING
+                self.queue_to_master = _QueueEmpty()
+                self.queue_to_proc = _QueueEmpty()
+                self.process = _DeadProcess()
+                self.timeout = None
+                self.start_time = None
+                self.error = pp.Proc.ERROR_NONE
+
+            def is_running(self):
+                return self.state == ProcState.RUNNING
+
+        class _Logger:
+            @staticmethod
+            def debug(msg):
+                del msg
+
+            @staticmethod
+            def info(msg):
+                del msg
+
+        class _FakeManager:
+            def __init__(self, proc):
+                self.logger = _Logger()
+                self.procs = {proc.name: proc}
+                self.completed_calls = []
+                self.try_execute_any_calls = 0
+
+            @staticmethod
+            def handle_sync_request(msg):
+                del msg
+                raise AssertionError('No sync request expected in this test')
+
+            @staticmethod
+            def raise_user_error(msg):
+                return pp.UserError(msg)
+
+            @staticmethod
+            def get_log_filename(name):
+                return os.path.join(tempfile.gettempdir(), f'{name}.log')
+
+            def complete_proc(self, *args, **kwargs):
+                proc, output, error, log_filename = args
+                more_info = kwargs.get('more_info')
+                proc.state = ProcState.FAILED
+                proc.error = error
+                self.completed_calls.append((proc, output, error, log_filename, more_info))
+
+            def try_execute_any(self):
+                self.try_execute_any_calls += 1
+
+        proc = _FakeProc()
+        manager = _FakeManager(proc)
+        runner = MultiProcessRunner()
+
+        runner.collect(manager)
+
+        self.assertEqual(len(manager.completed_calls), 1)
+        _proc, output, error, _log_filename, more_info = manager.completed_calls[0]
+        self.assertIsNone(output)
+        self.assertEqual(error, pp.Proc.ERROR_EXCEPTION)
+        self.assertIsNotNone(more_info)
+        more_info = str(more_info)
+        self.assertIn('exit code: 17', more_info)
+        self.assertEqual(proc.state, ProcState.FAILED)
+        self.assertEqual(proc.error, pp.Proc.ERROR_EXCEPTION)
+        self.assertEqual(manager.try_execute_any_calls, 1)

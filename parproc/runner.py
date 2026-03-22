@@ -8,9 +8,19 @@ import time
 from collections.abc import Callable
 from typing import Any, Protocol
 
+from .proc import Proc
 from .types import ProcState
 
 # Avoid circular import: runner is used by par. Runners only call methods on the manager.
+
+_SYNC_REQUESTS = (
+    'get-input',
+    'create-proc',
+    'run-proc',
+    'start-procs',
+    'check-complete',
+    'get-results',
+)
 
 
 class SyncChannel:
@@ -43,14 +53,24 @@ class Runner(Protocol):
 class MultiProcessRunner:
     """Runs tasks in separate processes using multiprocessing."""
 
-    def start_task(self, manager: Any, proc: Any) -> None:
+    def __init__(self) -> None:
         import multiprocessing as mp  # pylint: disable=import-outside-toplevel
 
+        self._ctx: Any
+        # Python 3.14 changed POSIX defaults away from fork. This library relies on
+        # fork-compatible semantics (local closures in tests/examples), so prefer a
+        # fork context when available to preserve existing behavior.
+        if 'fork' in mp.get_all_start_methods():
+            self._ctx = mp.get_context('fork')
+        else:
+            self._ctx = mp.get_context()
+
+    def start_task(self, manager: Any, proc: Any) -> None:
         context = {'args': proc.args, **manager.context}
         manager.logger.info(f'Exec "{proc.name}" with context {context}')
 
-        proc.queue_to_proc = mp.Queue()
-        proc.queue_to_master = mp.Queue()
+        proc.queue_to_proc = self._ctx.Queue()
+        proc.queue_to_master = self._ctx.Queue()
         proc.state = ProcState.RUNNING
         proc.start_time = time.time()
 
@@ -61,12 +81,39 @@ class MultiProcessRunner:
             manager.locks[l] = proc
 
         manager.term.start_proc(proc)
-        proc.process = mp.Process(
+        proc.process = self._ctx.Process(
             target=proc.func,
             name=f'parproc-child-{proc.name}',
             args=(proc.queue_to_proc, proc.queue_to_master, context, proc.name),
         )
-        proc.process.start()
+        try:
+            proc.process.start()
+        except Exception as e:  # pylint: disable=broad-exception-caught
+            # Do not leave proc in RUNNING state; that would stall wait loops forever.
+            log_filename = manager.get_log_filename(proc.name)
+            manager.complete_proc(
+                proc,
+                None,
+                Proc.ERROR_EXCEPTION,
+                log_filename,
+                more_info=f'failed to start child process: {type(e).__name__}: {e}',
+            )
+
+    def _handle_proc_message(self, manager: Any, proc: Any, msg: dict[str, Any], prefix: str = '') -> bool:
+        """Handle a single child->master message. Returns True when a proc completes."""
+        name = proc.name
+        manager.logger.debug(f'got {prefix}msg from proc "{name}": {msg}')
+        req = msg['req']
+        if req == 'proc-complete':
+            log_filename = msg.get('log_filename') or manager.get_log_filename(name)
+            more_info = msg.get('more_info')
+            manager.complete_proc(proc, msg['value'], msg['error'], log_filename, more_info=more_info)
+            return True
+        if req in _SYNC_REQUESTS:
+            resp = manager.handle_sync_request(msg)
+            proc.queue_to_proc.put(resp)
+            return False
+        raise manager.raise_user_error(f'unknown call: {req}')
 
     def collect(self, manager: Any) -> None:
         found_any = False
@@ -81,24 +128,31 @@ class MultiProcessRunner:
             except queue.Empty:
                 pass
             else:
-                manager.logger.debug(f'got msg from proc "{name}": {msg}')
-                if msg['req'] == 'proc-complete':
-                    log_filename = msg.get('log_filename') or manager.get_log_filename(name)
-                    more_info = msg.get('more_info')
-                    manager.complete_proc(p, msg['value'], msg['error'], log_filename, more_info=more_info)
+                found_any = self._handle_proc_message(manager, p, msg) or found_any
+
+            # Child exited without sending proc-complete: avoid hanging forever in RUNNING.
+            if p.is_running() and p.process is not None and not p.process.is_alive():
+                # Drain any pending completion message that may have raced with is_alive().
+                while True:
+                    try:
+                        late_msg = p.queue_to_master.get_nowait()
+                    except queue.Empty:
+                        break
+                    found_any = self._handle_proc_message(manager, p, late_msg, prefix='late ') or found_any
+                    if not p.is_running():
+                        break
+
+                if p.is_running():
+                    exit_code = p.process.exitcode
+                    log_filename = manager.get_log_filename(name)
+                    manager.complete_proc(
+                        p,
+                        None,
+                        Proc.ERROR_EXCEPTION,
+                        log_filename,
+                        more_info=f'child exited before completion message (exit code: {exit_code})',
+                    )
                     found_any = True
-                elif msg['req'] in (
-                    'get-input',
-                    'create-proc',
-                    'run-proc',
-                    'start-procs',
-                    'check-complete',
-                    'get-results',
-                ):
-                    resp = manager.handle_sync_request(msg)
-                    p.queue_to_proc.put(resp)
-                else:
-                    raise manager.raise_user_error(f'unknown call: {msg["req"]}')
 
             if (
                 p.is_running()
