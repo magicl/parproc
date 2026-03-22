@@ -6,6 +6,7 @@ import errno
 import glob as pyglob
 import os
 import tempfile
+import threading
 import time
 import unittest
 from typing import Any
@@ -794,6 +795,76 @@ class TestWatcherInternals(IncrementalBaseTest):
 
         self.assertIsInstance(watcher._observer, _FakePollingObserver)  # pylint: disable=protected-access
         self.assertEqual(scheduled.count(os.path.join(self._tmpdir, 'inputs')), 2)
+
+    def test_set_options_updates_watch_debounce_seconds(self) -> None:
+        mgr = pp.ProcManager.get_inst()
+        pp.set_options(watch_debounce_seconds=0.05)
+        self.assertEqual(mgr.watch_debounce_seconds, 0.05)  # pylint: disable=protected-access
+        self.assertEqual(mgr._file_watcher._change_grace_period_seconds, 0.05)  # pylint: disable=protected-access
+
+        pp.set_options(watch=True)
+        self.assertEqual(mgr._file_watcher._change_grace_period_seconds, 0.05)  # pylint: disable=protected-access
+
+    def test_set_options_rejects_negative_watch_debounce_seconds(self) -> None:
+        with self.assertRaises(pp.UserError):
+            pp.set_options(watch_debounce_seconds=-0.1)
+
+    def test_watcher_ignores_directory_modified_events(self) -> None:
+        file_path = self._write_file('inputs/src.txt', 'v1')
+        watched_dir = os.path.join(self._tmpdir, 'inputs')
+        watcher = FileWatcher(watch_enabled=True)
+        watcher.add_proc_inputs('build', [watched_dir])
+
+        class _Event:
+            def __init__(self, src_path: str, *, event_type: str, is_directory: bool) -> None:
+                self.src_path = src_path
+                self.dest_path = ''
+                self.event_type = event_type
+                self.is_directory = is_directory
+
+        watcher._handler.on_modified(  # pylint: disable=protected-access
+            _Event(watched_dir, event_type='modified', is_directory=True)
+        )
+        dirty_procs, changed_items = watcher.get_dirty_procs()
+        self.assertEqual(dirty_procs, set())
+        self.assertEqual(changed_items, set())
+
+        watcher._handler.on_created(  # pylint: disable=protected-access
+            _Event(file_path, event_type='created', is_directory=False)
+        )
+        dirty_procs, changed_items = watcher.get_dirty_procs()
+        self.assertEqual(dirty_procs, {'build'})
+        self.assertEqual(changed_items, {file_path})
+
+    def test_wait_for_changes_coalesces_bursty_updates(self) -> None:
+        watched_dir = os.path.join(self._tmpdir, 'inputs')
+        file_a = self._write_file('inputs/a.txt', 'a')
+        file_b = self._write_file('inputs/b.txt', 'b')
+        watcher = FileWatcher(watch_enabled=True)
+        watcher.add_proc_inputs('build', [watched_dir])
+
+        class _Event:
+            def __init__(self, src_path: str, *, event_type: str, is_directory: bool = False) -> None:
+                self.src_path = src_path
+                self.dest_path = ''
+                self.event_type = event_type
+                self.is_directory = is_directory
+
+        def _emit_second_change() -> None:
+            time.sleep(0.05)
+            watcher._handler.on_created(_Event(file_b, event_type='created'))  # pylint: disable=protected-access
+
+        watcher._handler.on_modified(_Event(file_a, event_type='modified'))  # pylint: disable=protected-access
+        thread = threading.Thread(target=_emit_second_change, daemon=True)
+        start = time.monotonic()
+        thread.start()
+        dirty_procs, changed_items = watcher.wait_for_changes(timeout=0.1)
+        elapsed = time.monotonic() - start
+        thread.join(timeout=0.5)
+
+        self.assertGreaterEqual(elapsed, 0.28)
+        self.assertEqual(dirty_procs, {'build'})
+        self.assertEqual(changed_items, {file_a, file_b})
 
 
 if __name__ == '__main__':

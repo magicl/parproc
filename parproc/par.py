@@ -137,8 +137,9 @@ class ProcManager:  # pylint: disable=too-many-public-methods
         self.task_db_path: str | None = None
         self.name_param_separator = '::'
         self.watch = False
+        self.watch_debounce_seconds = 0.3
         self._full: bool = False
-        self._file_watcher = FileWatcher(watch_enabled=False)
+        self._file_watcher = FileWatcher(watch_enabled=False, change_grace_period_seconds=self.watch_debounce_seconds)
 
     def clear(self):
         logger.debug('----------------CLEAR----------------------')
@@ -156,8 +157,11 @@ class ProcManager:  # pylint: disable=too-many-public-methods
         self.missing_deps: dict[str, bool] = {}
         self.allow_missing_deps = True
         self.watch = False
+        self.watch_debounce_seconds = 0.3
         self.pending_now = []  # Procs with now=True to be started on next _step
-        self._file_watcher = FileWatcher(watch_enabled=self.watch)
+        self._file_watcher = FileWatcher(
+            watch_enabled=self.watch, change_grace_period_seconds=self.watch_debounce_seconds
+        )
 
         if hasattr(self, 'term') and self.term is not None:
             self.term.clear()
@@ -182,6 +186,7 @@ class ProcManager:  # pylint: disable=too-many-public-methods
         task_db_path: str | None = _TASK_DB_PATH_UNSET,
         name_param_separator: str | None = None,
         watch: bool | None = None,  # pylint: disable=redefined-outer-name
+        watch_debounce_seconds: float | None = None,
     ) -> None:
         """
         parallel: Number of parallel running processes
@@ -193,6 +198,8 @@ class ProcManager:  # pylint: disable=too-many-public-methods
         name_param_separator: Separator between proto name and params (and between params). Default '::'.
           Param values may not contain this string. Patterns must use this separator between [param] placeholders.
         watch: Enables watch mode support when set to True. ``watch()`` requires this to be enabled.
+        watch_debounce_seconds: Debounce quiet period used in watch mode to coalesce bursty changes (default: 0.3).
+          Set to 0 to disable debouncing.
         """
         if parallel is not None:
             self.parallel = parallel
@@ -217,9 +224,16 @@ class ProcManager:  # pylint: disable=too-many-public-methods
             task_db.set_path(task_db_path)
         if name_param_separator is not None:
             self.name_param_separator = name_param_separator
+        if watch_debounce_seconds is not None:
+            if watch_debounce_seconds < 0:
+                raise UserError(f'watch_debounce_seconds must be >= 0, got {watch_debounce_seconds!r}')
+            self.watch_debounce_seconds = watch_debounce_seconds
+            self._file_watcher.set_change_grace_period_seconds(watch_debounce_seconds)
         if watch is not None:
             self.watch = watch
-            self._file_watcher = FileWatcher(watch_enabled=watch)
+            self._file_watcher = FileWatcher(
+                watch_enabled=watch, change_grace_period_seconds=self.watch_debounce_seconds
+            )
 
     def set_params(self, **params: Any) -> None:
         for k, v in params.items():

@@ -305,6 +305,7 @@ pp.set_options(
     mode='mp',                    # 'mp' (multiprocess) or 'single' (in-process)
     dynamic=True,                 # live terminal output (default: True if TTY)
     watch=False,                  # enable watch() support when true
+    watch_debounce_seconds=0.3,   # quiet-period debounce before watch re-runs (0 disables)
     name_param_separator='::',    # separator between proto pattern segments
     allow_missing_deps=True,      # don't error on deps that don't exist yet
     task_db_path='build/.parproc.db',  # SQLite DB for run history and result cache
@@ -408,6 +409,7 @@ When explicit proc names are provided, watch mode also watches the declared inpu
 `watch()` raises `UserError` unless `set_options(watch=True)` was set before scheduling/running.
 
 Watch mode uses the `watchdog` package to detect file changes (it is a core dependency of parproc).
+By default, watch mode waits for a 300ms quiet period (`watch_debounce_seconds=0.3`) before re-running, so save bursts are coalesced into one rebuild.
 
 ### How watch mode handles re-runs
 

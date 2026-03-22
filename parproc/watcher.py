@@ -40,6 +40,12 @@ class _ChangeHandler(FileSystemEventHandler):
         self._on_path_changed = on_path_changed
 
     def _handle(self, event: Any) -> None:
+        # Directory mtime churn is noisy (e.g. parent dir touched on file writes).
+        # Keep create/delete/move events for directories, but ignore directory-only
+        # modified events so we don't schedule duplicate rebuilds.
+        if bool(getattr(event, 'is_directory', False)) and getattr(event, 'event_type', '') == 'modified':
+            return
+
         changed_paths: list[str] = []
         src = getattr(event, 'src_path', '')
         if isinstance(src, str):
@@ -98,7 +104,7 @@ class _ChangeHandler(FileSystemEventHandler):
 class FileWatcher:
     """Tracks file status with optional live watch updates."""
 
-    def __init__(self, *, watch_enabled: bool = False) -> None:
+    def __init__(self, *, watch_enabled: bool = False, change_grace_period_seconds: float = 0.3) -> None:
         self._lock = threading.Lock()
         self._watch_enabled = watch_enabled
         self._path_to_procs: dict[str, set[str]] = {}
@@ -113,6 +119,15 @@ class FileWatcher:
             self._invalidate_path_caches,
         )
         self._observer: BaseObserver | None = None
+        # Debounce watch restarts so bursty editor/fs events are coalesced.
+        self._change_grace_period_seconds = 0.0
+        self.set_change_grace_period_seconds(change_grace_period_seconds)
+
+    def set_change_grace_period_seconds(self, seconds: float) -> None:
+        """Set debounce quiet period (seconds) used by wait_for_changes."""
+        if seconds < 0:
+            raise ValueError(f'change_grace_period_seconds must be >= 0, got {seconds!r}')
+        self._change_grace_period_seconds = seconds
 
     @staticmethod
     def _is_subpath(candidate: str, parent: str) -> bool:
@@ -285,6 +300,18 @@ class FileWatcher:
         return self._handler.drain_with_changes()
 
     def wait_for_changes(self, timeout: float | None = None) -> tuple[set[str], set[str]]:
-        """Block until at least one input changes (or timeout). Return dirty procs and changed items."""
+        """Block until changes settle, then return dirty procs and changed items."""
         self._handler.wait(timeout=timeout)
-        return self._handler.drain_with_changes()
+        dirty, changed_items = self._handler.drain_with_changes()
+        if not dirty or self._change_grace_period_seconds <= 0:
+            return dirty, changed_items
+
+        # Wait for a short quiet period so one save burst triggers one rebuild.
+        while True:
+            self._handler.wait(timeout=self._change_grace_period_seconds)
+            more_dirty, more_changed = self._handler.drain_with_changes()
+            if more_dirty:
+                dirty.update(more_dirty)
+                changed_items.update(more_changed)
+                continue
+            return dirty, changed_items
