@@ -208,6 +208,28 @@ class SimpleTest(TestCase):
         # Only one proc (the first) should run
         self.assertEqual(pp.results(), {'p0': None})
 
+    def test_proc_failed_error_message_propagates_to_more_info_and_log(self):
+        """ProcFailedError message should be surfaced cleanly and written to log."""
+        pp.wait_clear()
+
+        clean_message = 'Expected validation failure for user input'
+
+        @pp.Proc(name='fails-cleanly', now=True)
+        def fails_cleanly(context):
+            del context
+            raise pp.ProcFailedError(clean_message)
+
+        succeeded = pp.wait_for_all(exception_on_failure=False)
+        self.assertFalse(succeeded)
+
+        proc = pp.ProcManager.get_inst().procs['fails-cleanly']
+        self.assertEqual(proc.state, ProcState.FAILED)
+        self.assertEqual(proc.error, pp.Proc.ERROR_FAILED)
+        self.assertEqual(proc.more_info, clean_message)
+
+        with open(proc.log_filename, encoding='utf-8') as log_file:
+            self.assertIn(clean_message, log_file.read())
+
     def test_collector(self):
         """Tests proc with no function, can still have deps, and act as a collector"""
         pp.wait_clear()

@@ -1911,8 +1911,8 @@ class ProcManager:  # pylint: disable=too-many-public-methods
 
     def run_task(
         self, proc: 'Proc', pc: 'ProcContext', context: dict[str, Any], redirect: bool = True
-    ) -> tuple[Any, int, str]:
-        """Run task; return (ret, error, log_filename). redirect=False for single/debug (logs to console)."""
+    ) -> tuple[Any, int, str, str | None]:
+        """Run task; return (ret, error, log_filename, more_info)."""
         if proc.user_func is None:
             raise UserError('Proc has no user function')
         return run_task_with_redirect(proc.user_func, pc, context, redirect=redirect)
@@ -2017,11 +2017,12 @@ def run_task_with_redirect(
     pc: 'ProcContext',
     context: dict[str, Any],
     redirect: bool = True,
-) -> tuple[Any, int, str]:
+) -> tuple[Any, int, str, str | None]:
     """Run user task. If redirect=True, stdout/stderr go to log file; if False (debug/single), logs to console."""
     name = pc.proc_name
     log_filename = os.path.join(str(context['logdir']), name + '.log')
     error = Proc.ERROR_NONE
+    more_info: str | None = None
     ret = None
     with open(log_filename, 'w', encoding='utf-8') as log_file:
         if redirect:
@@ -2052,9 +2053,14 @@ def run_task_with_redirect(
             except ProcSkippedError:
                 # Ignore exception info
                 error = Proc.ERROR_SKIPPED
-            except ProcFailedError:
-                # Ignore exception info
+            except ProcFailedError as e:
                 error = Proc.ERROR_FAILED
+                failed_message = str(e).strip()
+                if failed_message:
+                    # Keep a concise, user-facing message on the failed task line and
+                    # also persist it in the log file for full-log viewing.
+                    more_info = failed_message
+                    log_file.write(f'{failed_message}\n')
             except Exception as e:  # pylint: disable=broad-exception-caught
                 # Detect sh library ErrorReturnCode (non-zero exit) without importing sh
                 exc_name = type(e).__name__
@@ -2086,13 +2092,13 @@ def run_task_with_redirect(
                     pass
                 sys.stdout = sys.__stdout__
                 sys.stderr = sys.__stderr__
-    return (ret, error, log_filename)
+    return (ret, error, log_filename, more_info)
 
 
-def run_task(user_func: Callable[..., Any], pc: 'ProcContext', context: dict[str, Any]) -> tuple[Any, int, Any]:
-    """Run user task with redirect to log file. Returns (ret, error, exc_info)."""
-    ret, error, _log_filename = run_task_with_redirect(user_func, pc, context, redirect=True)
-    return (ret, error, None)
+def run_task(user_func: Callable[..., Any], pc: 'ProcContext', context: dict[str, Any]) -> tuple[Any, int, str | None]:
+    """Run user task with redirect to log file. Returns (ret, error, more_info)."""
+    ret, error, _log_filename, more_info = run_task_with_redirect(user_func, pc, context, redirect=True)
+    return (ret, error, more_info)
 
 
 class DepProcContext:

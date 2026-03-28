@@ -200,7 +200,7 @@ class Proc:
             # Run in child process: no manager here, build ProcContext and run task directly.
             logger.info(f'proc "{name}" started')
             pc = ProcContext(name, context, queue_to_proc, queue_to_master)
-            ret, error, _exc_info = run_task_fn(f, pc, context)  # pylint: disable=not-callable
+            ret, error, more_info = run_task_fn(f, pc, context)  # pylint: disable=not-callable
             log_filename = os.path.join(str(context['logdir']), name + '.log')
             logger.info(f'proc "{name}" ended: ret = {ret}')
             if BaseModel is not None and isinstance(ret, BaseModel):
@@ -208,6 +208,8 @@ class Proc:
             import pickle as _pickle  # pylint: disable=import-outside-toplevel  # nosec: B403
 
             msg = {'req': 'proc-complete', 'value': ret, 'log_filename': log_filename, 'error': error}
+            if more_info is not None:
+                msg['more_info'] = more_info
             try:
                 _pickle.dumps(msg)
             except (TypeError, AttributeError, OSError, _pickle.PicklingError) as e:

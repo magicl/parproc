@@ -190,8 +190,8 @@ class SingleProcessRunner:
 
         sync_channel = SyncChannel(manager.handle_sync_request)
         pc = manager.build_pc(proc, context, sync_channel, sync_channel)
-        ret, error, log_filename = manager.run_task(proc, pc, context, redirect=False)
-        manager.complete_proc(proc, ret, error, log_filename)
+        ret, error, log_filename, more_info = manager.run_task(proc, pc, context, redirect=False)
+        manager.complete_proc(proc, ret, error, log_filename, more_info=more_info)
         manager.try_execute_any()
 
     def collect(self, manager: Any) -> None:
