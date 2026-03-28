@@ -7,6 +7,7 @@ All notable user-facing changes to parproc will be documented in this file.
 
 ### Added
 - Extensible log-ignore policy rules for `Proc`/`Proto` via `log_ignore`, including `IgnoreLogAlways` and `IgnoreLogIfSucceeded`.
+- PyPI distributions now include typing support files (`parproc/__init__.pyi` and `parproc/py.typed`) so installed `parproc` is recognized by `mypy`.
 
 ### Changed
 - `ProcFailedError("message")` now surfaces the message as a clean failure line (`more_info`) while still preserving full logs.

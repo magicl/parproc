@@ -52,7 +52,7 @@ build = [
 packages = {find = {exclude = ["tests*", "examples*"]}}
 
 [tool.setuptools.package-data]
-"*" = ["*.txt", "*.md"]
+"*" = ["*.txt", "*.md", "*.pyi", "py.typed"]
 
 [tool.mypy]
 python_version = "3.12"
