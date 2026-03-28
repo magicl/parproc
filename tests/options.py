@@ -53,3 +53,14 @@ class OptionsTest(TestCase):
         self.assertIn('proc_a', procs)
         self.assertIn('proc_b', procs)
         self.assertEqual(procs['proc_b'].state.name, 'FAILED_DEP')
+
+    def test_full_log_on_failure_option_propagates_to_term(self):
+        """Setting full_log_on_failure should update both manager and term."""
+        manager = pp.ProcManager.get_inst()
+        manager.set_options(full_log_on_failure=True)
+        self.assertTrue(manager.full_log_on_failure)
+        self.assertTrue(manager.term.show_full_log_on_failure)
+
+        manager.set_options(full_log_on_failure=False)
+        self.assertFalse(manager.full_log_on_failure)
+        self.assertFalse(manager.term.show_full_log_on_failure)

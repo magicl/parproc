@@ -19,7 +19,6 @@ from watchdog.observers.polling import PollingObserver
 
 logger = logging.getLogger('par')
 
-
 class _ChangeHandler(FileSystemEventHandler):
     """Watchdog handler that records which proc names are affected by file events."""
 

@@ -126,6 +126,8 @@ class ProcManager:  # pylint: disable=too-many-public-methods
         self.pending_now: list[str] = []
         self.clear()
         self.term = TermDynamic() if sys.stdout.isatty() else TermSimple()
+        self.full_log_on_failure = False
+        self._apply_term_options()
 
         # Options are set in set_options. Defaults:
         self.parallel = 100
@@ -169,12 +171,18 @@ class ProcManager:  # pylint: disable=too-many-public-methods
         if getattr(self, 'debug', False):
             self.parallel = 1
             self.term = TermSimple()
+            self._apply_term_options()
         if getattr(self, 'mode', 'mp') == 'single':
             self.runner = SingleProcessRunner()
         else:
             self.runner = MultiProcessRunner()
 
     _TASK_DB_PATH_UNSET: Any = object()  # Sentinel for "task_db_path not passed"
+
+    def _apply_term_options(self) -> None:
+        """Apply manager-controlled display options to the current terminal renderer."""
+        if hasattr(self, 'term') and self.term is not None:
+            self.term.show_full_log_on_failure = bool(getattr(self, 'full_log_on_failure', False))
 
     def set_options(
         self,
@@ -187,6 +195,7 @@ class ProcManager:  # pylint: disable=too-many-public-methods
         name_param_separator: str | None = None,
         watch: bool | None = None,  # pylint: disable=redefined-outer-name
         watch_debounce_seconds: float | None = None,
+        full_log_on_failure: bool | None = None,
     ) -> None:
         """
         parallel: Number of parallel running processes
@@ -200,11 +209,13 @@ class ProcManager:  # pylint: disable=too-many-public-methods
         watch: Enables watch mode support when set to True. ``watch()`` requires this to be enabled.
         watch_debounce_seconds: Debounce quiet period used in watch mode to coalesce bursty changes (default: 0.3).
           Set to 0 to disable debouncing.
+        full_log_on_failure: If True, show complete task log output for failed procs instead of extracted snippets.
         """
         if parallel is not None:
             self.parallel = parallel
         if dynamic is not None:
             self.term = TermDynamic() if dynamic else TermSimple()
+            self._apply_term_options()
         if mode is not None:
             if mode not in ('mp', 'single'):
                 raise UserError(f'mode must be "mp" or "single", got {mode!r}')
@@ -216,6 +227,7 @@ class ProcManager:  # pylint: disable=too-many-public-methods
                 self.mode = 'single'
                 self.parallel = 1
                 self.term = TermSimple()
+                self._apply_term_options()
                 self.runner = SingleProcessRunner()
         if allow_missing_deps is not None:
             self.allow_missing_deps = allow_missing_deps
@@ -234,6 +246,9 @@ class ProcManager:  # pylint: disable=too-many-public-methods
             self._file_watcher = FileWatcher(
                 watch_enabled=watch, change_grace_period_seconds=self.watch_debounce_seconds
             )
+        if full_log_on_failure is not None:
+            self.full_log_on_failure = full_log_on_failure
+            self._apply_term_options()
 
     def set_params(self, **params: Any) -> None:
         for k, v in params.items():
@@ -2192,9 +2207,9 @@ class Proto:
         timeout: float | None = None,
         wave: int = 0,
         arg_choices: dict[str, Sequence[Any]] | Callable[..., dict[str, Sequence[Any]]] | None = None,
-        inputs: list[str | Callable[..., list[str]]] | None = None,
-        inputs_ignore: list[str | Callable[..., list[str]]] | None = None,
-        outputs: list[str | Callable[..., list[str]]] | None = None,
+        inputs: list[str | Callable[..., list[str]]] | Callable[..., list[str]] | None = None,
+        inputs_ignore: list[str | Callable[..., list[str]]] | Callable[..., list[str]] | None = None,
+        outputs: list[str | Callable[..., list[str]]] | Callable[..., list[str]] | None = None,
         no_skip: bool = False,
     ):
         # Input properties
@@ -2226,9 +2241,14 @@ class Proto:
             self.arg_choices = dict(arg_choices)
         # special_deps are stored inside deps; extracted when resolving
         self.special_deps: list[SpecialDep] = [d for d in _deps if isinstance(d, SpecialDep)]
-        self.inputs = [inputs] if callable(inputs) else inputs
-        self.inputs_ignore = [inputs_ignore] if callable(inputs_ignore) else inputs_ignore
-        self.outputs = [outputs] if callable(outputs) else outputs
+        normalized_inputs: list[str | Callable[..., list[str]]] | None = [inputs] if callable(inputs) else inputs
+        normalized_inputs_ignore: list[str | Callable[..., list[str]]] | None = (
+            [inputs_ignore] if callable(inputs_ignore) else inputs_ignore
+        )
+        normalized_outputs: list[str | Callable[..., list[str]]] | None = [outputs] if callable(outputs) else outputs
+        self.inputs = normalized_inputs
+        self.inputs_ignore = normalized_inputs_ignore
+        self.outputs = normalized_outputs
         self.no_skip = no_skip
 
         # Initialize regex attributes (will be set in _build_regex_pattern)

@@ -308,11 +308,14 @@ pp.set_options(
     watch_debounce_seconds=0.3,   # quiet-period debounce before watch re-runs (0 disables)
     name_param_separator='::',    # separator between proto pattern segments
     allow_missing_deps=True,      # don't error on deps that don't exist yet
+    full_log_on_failure=True,     # show complete log output for failed procs
     task_db_path='build/.parproc.db',  # SQLite DB for run history and result cache
 )
 ```
 
 Setting `task_db_path` enables two features: progress bar time estimates (based on historical run durations) and **incremental builds** (result caching so unchanged procs can be auto-skipped). The DB is safe to delete at any time -- losing it just means everything runs once to repopulate.
+
+By default, parproc prints focused log snippets for failures (keyword/context extraction). Set `full_log_on_failure=True` to always print the entire failing proc log instead.
 
 
 ## Incremental builds
@@ -458,6 +461,7 @@ Run any of the example scripts:
 uv run python examples/success.py
 uv run python examples/error.py
 uv run python examples/failed_deps.py
+uv run python examples/full_log_on_failure.py
 ```
 
 

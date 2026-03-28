@@ -64,3 +64,16 @@ class ErrorFormatTest(TestCase):
         logging.info(output)
 
         self.assertEqual(output, expected_output)
+
+    def test_full_log_on_failure_returns_complete_log(self):
+        """When enabled, failed tasks should print the complete log output."""
+        error_msg = """line 1
+line 2 warning
+line 3
+line 4"""
+
+        chunks = Term.extract_error_log(error_msg, task_failed=True, full_log_on_failure=True)
+        output = '\n'.join(chunk.content for chunk in chunks)
+
+        self.assertEqual(len(chunks), 1)
+        self.assertEqual(output, error_msg)

@@ -125,6 +125,7 @@ class Term:
         self.console = Console()
         self.progress: Progress | None = None
         self.live: Live | None = None
+        self.show_full_log_on_failure = False
 
     def clear(self) -> None:
         """Reset display state (e.g. when ProcManager.clear() starts a new session)."""
@@ -261,7 +262,7 @@ class Term:
                     self.console.print(f'  {line}')
 
     @staticmethod
-    def extract_error_log(text: str, task_failed: bool) -> list[LogChunk]:
+    def extract_error_log(text: str, task_failed: bool, full_log_on_failure: bool = False) -> list[LogChunk]:
         """
         Extract relevant log chunks from text.
 
@@ -275,6 +276,9 @@ class Term:
         lines = text.split('\n')
         total_lines = len(lines)
         chunks: list[LogChunk] = []
+
+        if task_failed and full_log_on_failure:
+            return [LogChunk(content=text, start_line=1, end_line=total_lines)]
 
         # If task failed, try parsers first
         if task_failed:
@@ -363,7 +367,9 @@ class TermSimple(Term):
             with open(disp.proc.log_filename, encoding='utf-8') as f:
                 log_text = f.read()
             task_failed = disp.proc.state in FAILED_STATES and disp.proc.state != ProcState.SKIPPED
-            disp.chunks = Term.extract_error_log(log_text, task_failed)
+            disp.chunks = Term.extract_error_log(
+                log_text, task_failed, full_log_on_failure=self.show_full_log_on_failure
+            )
         self._render_proc_static(disp)
         del self.active[p]
 
@@ -428,7 +434,9 @@ class TermDynamic(Term):
             with open(disp.proc.log_filename, encoding='utf-8') as f:
                 log_text = f.read()
             task_failed = disp.proc.state in FAILED_STATES and disp.proc.state != ProcState.SKIPPED
-            disp.chunks = Term.extract_error_log(log_text, task_failed)
+            disp.chunks = Term.extract_error_log(
+                log_text, task_failed, full_log_on_failure=self.show_full_log_on_failure
+            )
         if disp.start_time is not None:
             elapsed = time.time() - disp.start_time
             disp.execution_time = f" ({elapsed:.2f}s)"
