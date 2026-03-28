@@ -25,7 +25,7 @@ from rich.text import Text
 
 from . import task_db
 from .proc import Proc
-from .types import FAILED_STATES, SUCCEEDED_STATES, ProcState
+from .types import FAILED_STATES, SUCCEEDED_STATES, LogIssueRule, ProcState
 
 
 @dataclass
@@ -262,13 +262,47 @@ class Term:
                     self.console.print(f'  {line}')
 
     @staticmethod
-    def extract_error_log(text: str, task_failed: bool, full_log_on_failure: bool = False) -> list[LogChunk]:
+    def _active_log_ignore_patterns(
+        log_ignore: list[str | LogIssueRule] | None, *, task_succeeded: bool
+    ) -> list[re.Pattern[str]]:
+        if not log_ignore:
+            return []
+        active_patterns: list[re.Pattern[str]] = []
+        for rule in log_ignore:
+            if isinstance(rule, str):
+                active_patterns.append(re.compile(rule))
+                continue
+            if rule.applies(task_succeeded=task_succeeded):
+                active_patterns.append(re.compile(rule.pattern))
+        return active_patterns
+
+    @staticmethod
+    def _line_is_ignored(line: str, patterns: list[re.Pattern[str]]) -> bool:
+        return any(pattern.search(line) for pattern in patterns)
+
+    @staticmethod
+    def _filter_text_lines(text: str, patterns: list[re.Pattern[str]]) -> str:
+        if not patterns:
+            return text
+        filtered_lines = [line for line in text.split('\n') if not Term._line_is_ignored(line, patterns)]
+        return '\n'.join(filtered_lines)
+
+    @staticmethod
+    def extract_error_log(
+        text: str,
+        task_failed: bool,
+        full_log_on_failure: bool = False,
+        log_ignore: list[str | LogIssueRule] | None = None,
+        task_succeeded: bool = False,
+    ) -> list[LogChunk]:
         """
         Extract relevant log chunks from text.
 
         Args:
             text: The full log text
             task_failed: Whether the task failed (if True, MUST return at least one chunk)
+            log_ignore: Optional regex-based line ignore rules applied before extraction.
+            task_succeeded: Whether the task ended in a success state (used by conditional ignore rules).
 
         Returns:
             List of LogChunk objects with content and line number ranges
@@ -276,8 +310,12 @@ class Term:
         lines = text.split('\n')
         total_lines = len(lines)
         chunks: list[LogChunk] = []
+        ignore_patterns = Term._active_log_ignore_patterns(log_ignore, task_succeeded=task_succeeded)
 
         if task_failed and full_log_on_failure:
+            filtered_text = Term._filter_text_lines(text, ignore_patterns)
+            if filtered_text.strip():
+                return [LogChunk(content=filtered_text, start_line=1, end_line=total_lines)]
             return [LogChunk(content=text, start_line=1, end_line=total_lines)]
 
         # If task failed, try parsers first
@@ -296,21 +334,27 @@ class Term:
                 m = re.match(reg, text)
                 if m:
                     # Match with parser - return as single chunk
-                    content = output(m)
+                    content = Term._filter_text_lines(output(m), ignore_patterns)
+                    if not content.strip():
+                        break
                     # Estimate line numbers (approximate based on content position)
                     # For parser matches, we'll use the full range since we matched the whole text
                     return [LogChunk(content=content, start_line=1, end_line=total_lines)]
 
         # Search for keywords in the log (convert to lowercase for matching)
         keywords = ['exception', 'error', 'warning', 'notice', 'deprecated', 'deprecation']
-        lines_lower = [line.lower() for line in lines]
+        visible_lines = [
+            (line_idx, line)
+            for line_idx, line in enumerate(lines, start=1)
+            if not Term._line_is_ignored(line, ignore_patterns)
+        ]
 
         # Find line numbers where keywords appear
         cutout_ranges: list[tuple[int, int]] = []  # List of (start_line, end_line) ranges
 
         for keyword in keywords:
-            for line_idx, line in enumerate(lines_lower, start=1):
-                if keyword in line:
+            for line_idx, line in visible_lines:
+                if keyword in line.lower():
                     # Add range: line number ± context_lines
                     start = max(1, line_idx - Term.context_lines)
                     end = min(total_lines, line_idx + Term.context_lines)
@@ -333,17 +377,31 @@ class Term:
         if cutout_ranges:
             for start, end in cutout_ranges:
                 # Extract lines (convert back to 0-indexed for list access)
-                chunk_lines = lines[start - 1 : end]
+                chunk_lines = [
+                    line
+                    for line_idx, line in enumerate(lines[start - 1 : end], start=start)
+                    if not Term._line_is_ignored(line, ignore_patterns)
+                ]
+                if not chunk_lines:
+                    continue
                 content = '\n'.join(chunk_lines)
                 chunks.append(LogChunk(content=content, start_line=start, end_line=end))
         elif task_failed:
             # If task failed but no keywords found, grab bottom 16 lines
             # (MUST output something if task failed)
-            start = max(1, total_lines - 15)  # -15 because we want 16 lines total
-            end = total_lines
-            chunk_lines = lines[start - 1 : end]
-            content = '\n'.join(chunk_lines)
-            chunks.append(LogChunk(content=content, start_line=start, end_line=end))
+            visible_tail = visible_lines[-16:]
+            if visible_tail:
+                start = visible_tail[0][0]
+                end = visible_tail[-1][0]
+                content = '\n'.join(line for _, line in visible_tail)
+                chunks.append(LogChunk(content=content, start_line=start, end_line=end))
+            else:
+                # Fallback: avoid rendering an empty panel when all lines were ignored.
+                start = max(1, total_lines - 15)  # -15 because we want 16 lines total
+                end = total_lines
+                chunk_lines = lines[start - 1 : end]
+                content = '\n'.join(chunk_lines)
+                chunks.append(LogChunk(content=content, start_line=start, end_line=end))
         # If task didn't fail and no keywords found, return empty list
 
         return chunks
@@ -368,7 +426,11 @@ class TermSimple(Term):
                 log_text = f.read()
             task_failed = disp.proc.state in FAILED_STATES and disp.proc.state != ProcState.SKIPPED
             disp.chunks = Term.extract_error_log(
-                log_text, task_failed, full_log_on_failure=self.show_full_log_on_failure
+                log_text,
+                task_failed,
+                full_log_on_failure=self.show_full_log_on_failure,
+                log_ignore=disp.proc.log_ignore,
+                task_succeeded=disp.proc.state in SUCCEEDED_STATES,
             )
         self._render_proc_static(disp)
         del self.active[p]
@@ -435,7 +497,11 @@ class TermDynamic(Term):
                 log_text = f.read()
             task_failed = disp.proc.state in FAILED_STATES and disp.proc.state != ProcState.SKIPPED
             disp.chunks = Term.extract_error_log(
-                log_text, task_failed, full_log_on_failure=self.show_full_log_on_failure
+                log_text,
+                task_failed,
+                full_log_on_failure=self.show_full_log_on_failure,
+                log_ignore=disp.proc.log_ignore,
+                task_succeeded=disp.proc.state in SUCCEEDED_STATES,
             )
         if disp.start_time is not None:
             elapsed = time.time() - disp.start_time

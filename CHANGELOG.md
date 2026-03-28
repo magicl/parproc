@@ -5,6 +5,9 @@ All notable user-facing changes to parproc will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+- Extensible log-ignore policy rules for `Proc`/`Proto` via `log_ignore`, including `IgnoreLogAlways` and `IgnoreLogIfSucceeded`.
+
 ### Changed
 - `ProcFailedError("message")` now surfaces the message as a clean failure line (`more_info`) while still preserving full logs.
 - The same `ProcFailedError` message is now also written to the proc log file, so full-log mode and log links include it.

@@ -16,6 +16,28 @@ class ProtoTest(TestCase):  # pylint: disable=too-many-public-methods
         mode = os.environ.get('PARPROC_TEST_MODE', 'mp')
         pp.ProcManager.get_inst().set_options(mode=mode, dynamic=False)
 
+    def test_proto_log_ignore_propagates_to_proc(self):
+        """Proto log_ignore configuration should be copied to created procs."""
+        pp.wait_clear()
+        rule = pp.IgnoreLogIfSucceeded(r'known warning')
+
+        @pp.Proto(name='build::[env]', log_ignore=[rule, r'legacy warning'])
+        def build(context: pp.ProcContext, env: str) -> str:
+            del context
+            return env
+
+        created = pp.create('build::dev')
+        self.assertEqual(created, ['build::dev'])
+
+        proc = pp.get_procs()['build::dev']
+        log_ignore = proc.log_ignore
+        self.assertIsNotNone(log_ignore)
+        if log_ignore is None:
+            self.fail('Expected proc.log_ignore to be populated from proto')
+        self.assertEqual(len(log_ignore), 2)
+        self.assertIs(log_ignore[0], rule)
+        self.assertEqual(log_ignore[1], r'legacy warning')
+
     def test_proto_from_base(self):
         """Proto creation from base"""
 

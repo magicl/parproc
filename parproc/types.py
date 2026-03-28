@@ -42,6 +42,37 @@ class RdepRule:
         return f'{type(self).__name__}({self.pattern!r})'
 
 
+class LogIssueRule:
+    """Base class for log issue filtering rules.
+
+    Subclasses can be placed in ``Proc(..., log_ignore=[...])`` and
+    ``Proto(..., log_ignore=[...])`` to control which log lines are ignored when
+    rendering extracted warning/error snippets.
+    """
+
+    def __init__(self, pattern: str):
+        self.pattern = pattern
+
+    def applies(self, *, task_succeeded: bool) -> bool:
+        """Return whether this rule applies for the current task outcome."""
+        del task_succeeded
+        return True
+
+    def __repr__(self) -> str:
+        return f'{type(self).__name__}({self.pattern!r})'
+
+
+class IgnoreLogAlways(LogIssueRule):
+    """Ignore matching log lines regardless of task outcome."""
+
+
+class IgnoreLogIfSucceeded(LogIssueRule):
+    """Ignore matching log lines only when the task succeeded."""
+
+    def applies(self, *, task_succeeded: bool) -> bool:
+        return task_succeeded
+
+
 class WhenScheduled(RdepRule):
     """Conditional reverse dependency that activates only when the declaring proc is scheduled.
 

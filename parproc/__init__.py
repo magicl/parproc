@@ -22,7 +22,15 @@ from .par import (
     wait_for_all,
     watch,
 )
-from .types import NO_FAILURES, RdepRule, WhenScheduled, WhenTargetScheduled
+from .types import (
+    NO_FAILURES,
+    IgnoreLogAlways,
+    IgnoreLogIfSucceeded,
+    LogIssueRule,
+    RdepRule,
+    WhenScheduled,
+    WhenTargetScheduled,
+)
 
 __all__ = [
     'ProcManager',
@@ -37,6 +45,9 @@ __all__ = [
     'RdepRule',
     'WhenScheduled',
     'WhenTargetScheduled',
+    'LogIssueRule',
+    'IgnoreLogAlways',
+    'IgnoreLogIfSucceeded',
     'wait_for_all',
     'results',
     'set_params',

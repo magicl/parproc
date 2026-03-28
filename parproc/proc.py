@@ -2,6 +2,7 @@
 
 import logging
 import os
+import re
 from collections.abc import Callable
 from typing import Any, TypeVar
 
@@ -16,6 +17,7 @@ except ImportError:
 from .types import (
     FAILED_STATES,
     SUCCEEDED_STATES,
+    LogIssueRule,
     ProcessError,
     ProcState,
     RdepRule,
@@ -133,6 +135,7 @@ class Proc:
         inputs: list[str | Callable[..., list[str]]] | Callable[..., list[str]] | None = None,
         inputs_ignore: list[str | Callable[..., list[str]]] | Callable[..., list[str]] | None = None,
         outputs: list[str | Callable[..., list[str]]] | Callable[..., list[str]] | None = None,
+        log_ignore: list[str | LogIssueRule] | str | LogIssueRule | None = None,
         no_skip: bool = False,
     ):
         if special_deps is not None:
@@ -158,9 +161,26 @@ class Proc:
             [inputs_ignore] if callable(inputs_ignore) else inputs_ignore
         )
         normalized_outputs: list[str | Callable[..., list[str]]] | None = [outputs] if callable(outputs) else outputs
+        normalized_log_ignore: list[str | LogIssueRule] | None
+        if isinstance(log_ignore, (str, LogIssueRule)):
+            normalized_log_ignore = [log_ignore]
+        else:
+            normalized_log_ignore = log_ignore
+        if normalized_log_ignore is not None:
+            for rule in normalized_log_ignore:
+                if not isinstance(rule, (str, LogIssueRule)):
+                    raise UserError(
+                        'Proc log_ignore must contain str or LogIssueRule values, ' f'got {type(rule).__name__!r}.'
+                    )
+                pattern = rule if isinstance(rule, str) else rule.pattern
+                try:
+                    re.compile(pattern)
+                except re.error as e:
+                    raise UserError(f'Invalid regex in Proc log_ignore: {pattern!r}: {e}') from e
         self.inputs = normalized_inputs
         self.inputs_ignore = normalized_inputs_ignore
         self.outputs = normalized_outputs
+        self.log_ignore = normalized_log_ignore
         self.no_skip = no_skip
         self.log_filename = ''
         import uuid  # pylint: disable=import-outside-toplevel

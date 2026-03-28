@@ -317,6 +317,23 @@ Setting `task_db_path` enables two features: progress bar time estimates (based 
 
 By default, parproc prints focused log snippets for failures (keyword/context extraction). Set `full_log_on_failure=True` to always print the entire failing proc log instead.
 
+You can also ignore selected warning/error lines during snippet extraction with `log_ignore` on both `Proc` and `Proto`:
+
+```python
+@pp.Proto(
+    name='build::[env]',
+    log_ignore=[
+        pp.IgnoreLogAlways(r'^warning: known noisy tool warning'),
+        pp.IgnoreLogIfSucceeded(r'^error: flaky-but-non-blocking$'),
+        r'^deprecated: old-sdk',  # shorthand: same as IgnoreLogAlways(...)
+    ],
+)
+def build(ctx: pp.ProcContext, env: str) -> None:
+    ...
+```
+
+`IgnoreLogAlways` applies for both successes and failures. `IgnoreLogIfSucceeded` applies only when the proc ends in `SUCCEEDED`, `SKIPPED`, or `UP_TO_DATE`. These rules affect terminal log snippet extraction/display only; they do not change task success/failure state.
+
 
 ## Incremental builds
 
