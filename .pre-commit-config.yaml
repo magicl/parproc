@@ -23,6 +23,8 @@ repos:
   hooks:
   - id: mypy
     verbose: true
+    pass_filenames: false
+    args: [parproc, tests, examples]
     additional_dependencies: ['types-requests', 'types-python-dateutil', 'types-pytz']
 
 - repo: https://github.com/psf/black
