@@ -1,7 +1,22 @@
 from collections.abc import Callable, Sequence
-from enum import Enum
 from os import PathLike
 from typing import Any, TypeVar
+
+from .types import (
+    NO_FAILURES,
+    IgnoreLogAlways,
+    IgnoreLogIfSucceeded,
+    LogIssueRule,
+    ProcessError,
+    ProcFailedError,
+    ProcSkippedError,
+    ProcState,
+    RdepRule,
+    SpecialDep,
+    UserError,
+    WhenScheduled,
+    WhenTargetScheduled,
+)
 
 F = TypeVar('F', bound=Callable[..., Any])
 DepSpecOrList = str | list[str]
@@ -10,32 +25,37 @@ FileSpec = str | Callable[..., list[str]]
 ArgChoices = dict[str, Sequence[Any]]
 ArgChoicesFn = Callable[..., ArgChoices]
 
-class SpecialDep(Enum):
-    NO_FAILURES = 'no_failures'
-
-NO_FAILURES: SpecialDep
-
-class RdepRule:
-    pattern: str
-    def __init__(self, pattern: str) -> None: ...
-
-class WhenScheduled(RdepRule): ...
-class WhenTargetScheduled(RdepRule): ...
-
-class LogIssueRule:
-    pattern: str
-    def __init__(self, pattern: str) -> None: ...
-    def applies(self, *, task_succeeded: bool) -> bool: ...
-
-class IgnoreLogAlways(LogIssueRule): ...
-
-class IgnoreLogIfSucceeded(LogIssueRule):
-    def applies(self, *, task_succeeded: bool) -> bool: ...
-
-class UserError(Exception): ...
-class ProcessError(Exception): ...
-class ProcFailedError(Exception): ...
-class ProcSkippedError(Exception): ...
+__all__ = [
+    'ProcManager',
+    'ProcessError',
+    'ProcFailedError',
+    'ProcSkippedError',
+    'UserError',
+    'ProcContext',
+    'Proto',
+    'Proc',
+    'NO_FAILURES',
+    'RdepRule',
+    'WhenScheduled',
+    'WhenTargetScheduled',
+    'LogIssueRule',
+    'IgnoreLogAlways',
+    'IgnoreLogIfSucceeded',
+    'wait_for_all',
+    'results',
+    'set_params',
+    'wait_clear',
+    'start',
+    'create',
+    'run',
+    'regex_files',
+    'set_options',
+    'wait',
+    'watch',
+    'clear',
+    'get_procs',
+    'get_protos',
+]
 
 class ProcContext:
     proc_name: str
@@ -66,6 +86,7 @@ class ProcManager:
         allow_missing_deps: bool | None = None,
         task_db_path: str | None = ...,
         name_param_separator: str | None = None,
+        global_inputs_ignore: Sequence[FileSpec] | Callable[..., list[str]] | None = None,
         watch: bool | None = None,
         watch_debounce_seconds: float | None = None,
         full_log_on_failure: bool | None = None,
@@ -90,6 +111,7 @@ def set_options(
     allow_missing_deps: bool | None = None,
     task_db_path: str | None = None,
     name_param_separator: str | None = None,
+    global_inputs_ignore: Sequence[FileSpec] | Callable[..., list[str]] | None = None,
     watch: bool | None = None,
     watch_debounce_seconds: float | None = None,
     full_log_on_failure: bool | None = None,
@@ -115,7 +137,6 @@ class Proc:
     ERROR_FAILED: int
     ERROR_SKIPPED: int
     ERROR_OUTPUTS_NOT_REFRESHED: int
-
     def __init__(
         self,
         name: str | None = None,

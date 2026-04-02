@@ -192,6 +192,7 @@ class Term:
         is_bug = disp.proc.state in FAILED_STATES
         border_style = "red" if is_bug else "yellow"
         link_bg_style = "bold white on dark_red" if is_bug else "bold black on yellow"
+        log_content: Any
         if _has_ansi_color(log_content_str):
             log_content = Text.from_ansi(log_content_str)
         else:

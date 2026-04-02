@@ -40,6 +40,8 @@ If any pre-commit check or test fails, fix the issue and re-run. Do not consider
 
 - **Use proper types everywhere.** Do not use `Any` unless there is an extremely compelling reason (e.g., interfacing with an untyped third-party API where the type is genuinely unknown and unknowable). If you must use `Any`, add a comment explaining why.
 - The project uses **mypy** for static type checking (see pre-commit config). All code must pass mypy without errors.
+- **`parproc/__init__.pyi` defines the public typing interface for library consumers.** Keep it aligned with exported/public API changes.
+- **Do not add internal/test-only members to `parproc/__init__.pyi`.** Internal implementation details should stay out of the public stub; tests that inspect internals should be handled via test typing configuration/import patterns, not by expanding the consumer-facing interface.
 
 ### Formatting
 

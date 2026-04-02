@@ -139,6 +139,7 @@ class ProcManager:  # pylint: disable=too-many-public-methods
         self.allow_missing_deps = True
         self.task_db_path: str | None = None
         self.name_param_separator = '::'
+        self.global_inputs_ignore: list[str | Callable[..., list[str]]] | None = None
         self.watch = False
         self.watch_debounce_seconds = 0.3
         self._full: bool = False
@@ -159,6 +160,7 @@ class ProcManager:  # pylint: disable=too-many-public-methods
         }
         self.missing_deps: dict[str, bool] = {}
         self.allow_missing_deps = True
+        self.global_inputs_ignore = None
         self.watch = False
         self.watch_debounce_seconds = 0.3
         self.pending_now = []  # Procs with now=True to be started on next _step
@@ -179,6 +181,7 @@ class ProcManager:  # pylint: disable=too-many-public-methods
             self.runner = MultiProcessRunner()
 
     _TASK_DB_PATH_UNSET: Any = object()  # Sentinel for "task_db_path not passed"
+    _GLOBAL_INPUTS_IGNORE_UNSET: Any = object()  # Sentinel for "global_inputs_ignore not passed"
 
     def _apply_term_options(self) -> None:
         """Apply manager-controlled display options to the current terminal renderer."""
@@ -194,6 +197,9 @@ class ProcManager:  # pylint: disable=too-many-public-methods
         allow_missing_deps: bool | None = None,
         task_db_path: str | None = _TASK_DB_PATH_UNSET,
         name_param_separator: str | None = None,
+        global_inputs_ignore: list[str | Callable[..., list[str]]] | Callable[..., list[str]] | None = (
+            _GLOBAL_INPUTS_IGNORE_UNSET
+        ),
         watch: bool | None = None,  # pylint: disable=redefined-outer-name
         watch_debounce_seconds: float | None = None,
         full_log_on_failure: bool | None = None,
@@ -207,6 +213,7 @@ class ProcManager:  # pylint: disable=too-many-public-methods
         task_db_path: Path to SQLite DB for task run history (progress estimates). None to disable.
         name_param_separator: Separator between proto name and params (and between params). Default '::'.
           Param values may not contain this string. Patterns must use this separator between [param] placeholders.
+        global_inputs_ignore: Global input ignore specs (globs/paths/callables) appended to each proc/proto inputs_ignore.
         watch: Enables watch mode support when set to True. ``watch()`` requires this to be enabled.
         watch_debounce_seconds: Debounce quiet period used in watch mode to coalesce bursty changes (default: 0.3).
           Set to 0 to disable debouncing.
@@ -237,6 +244,17 @@ class ProcManager:  # pylint: disable=too-many-public-methods
             task_db.set_path(task_db_path)
         if name_param_separator is not None:
             self.name_param_separator = name_param_separator
+        if global_inputs_ignore is not ProcManager._GLOBAL_INPUTS_IGNORE_UNSET:
+            normalized_global_inputs_ignore: list[str | Callable[..., list[str]]] | None = (
+                [global_inputs_ignore] if callable(global_inputs_ignore) else global_inputs_ignore
+            )
+            if normalized_global_inputs_ignore is not None:
+                for spec in normalized_global_inputs_ignore:
+                    if not isinstance(spec, str) and not callable(spec):
+                        raise UserError(
+                            f'global_inputs_ignore must contain str or callable values, got {type(spec).__name__!r}.'
+                        )
+            self.global_inputs_ignore = normalized_global_inputs_ignore
         if watch_debounce_seconds is not None:
             if watch_debounce_seconds < 0:
                 raise UserError(f'watch_debounce_seconds must be >= 0, got {watch_debounce_seconds!r}')
@@ -824,9 +842,20 @@ class ProcManager:  # pylint: disable=too-many-public-methods
         if proc.inputs is None:
             return []
         resolved = self._resolve_file_specs(proc.inputs, proc)
-        if proc.inputs_ignore is None:
+        effective_ignore_specs = self._effective_inputs_ignore_specs(proc)
+        if effective_ignore_specs is None:
             return resolved
-        return self._exclude_ignored_specs(resolved, proc.inputs_ignore, proc)
+        return self._exclude_ignored_specs(resolved, effective_ignore_specs, proc)
+
+    def _effective_inputs_ignore_specs(self, proc: 'Proc') -> list[str | Callable[..., list[str]]] | None:
+        """Return proc-local inputs_ignore plus global_inputs_ignore from manager options."""
+        if proc.inputs_ignore is None and self.global_inputs_ignore is None:
+            return None
+        if proc.inputs_ignore is None:
+            return list(self.global_inputs_ignore) if self.global_inputs_ignore is not None else None
+        if self.global_inputs_ignore is None:
+            return list(proc.inputs_ignore)
+        return [*proc.inputs_ignore, *self.global_inputs_ignore]
 
     def _exclude_ignored_specs(
         self,
@@ -881,12 +910,13 @@ class ProcManager:  # pylint: disable=too-many-public-methods
         if proc.inputs is None:
             return [], [], []
         watch_paths = self._resolve_watch_specs(proc.inputs, proc)
-        if proc.inputs_ignore is None:
+        effective_ignore_specs = self._effective_inputs_ignore_specs(proc)
+        if effective_ignore_specs is None:
             return watch_paths, [], []
 
         ignored_watch_paths: list[str] = []
         ignored_watch_globs: list[str] = []
-        for spec in proc.inputs_ignore:
+        for spec in effective_ignore_specs:
             values: list[str]
             if isinstance(spec, str):
                 values = [spec]
