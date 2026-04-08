@@ -12,9 +12,6 @@ All notable user-facing changes to parproc will be documented in this file.
 - Input resolution now combines per-proc `inputs_ignore` with global `global_inputs_ignore` for both incremental fingerprinting and watch-path derivation.
 - Type stubs in `parproc/__init__.pyi` were refined as the consumer-facing public typing interface, with explicit exports for type checkers.
 
-### Internal
-- Test mypy overrides were updated so internal test assertions against private runtime attributes do not force those internals into the public stub surface.
-
 
 ## [0.6.2]
 
