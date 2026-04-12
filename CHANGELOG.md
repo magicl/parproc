@@ -3,6 +3,12 @@
 All notable user-facing changes to parproc will be documented in this file.
 
 
+## [0.6.4]
+
+### Changed
+- Terminal UI: running tasks now use the same `file://` log hyperlink as completed tasks (dynamic progress and static mode). `Proc.log_filename` is set when a task starts so the path is known before completion.
+
+
 ## [0.6.3]
 
 ### Added

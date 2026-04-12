@@ -88,6 +88,15 @@ def _get_error_type_message(disp: Displayable) -> str:
     return " failed"
 
 
+def _proc_name_markup(proc: Proc) -> str:
+    """Escaped proc name with terminal file link when *log_filename* is set."""
+    name_escaped = escape(proc.name or "")
+    if proc.log_filename:
+        abs_path = os.path.abspath(proc.log_filename)
+        return f"[link=file://{abs_path}]{name_escaped}[/link]"
+    return name_escaped
+
+
 def _format_completed_line_markup(disp: Displayable) -> str:
     """Return markup string for one completed task line (for live area or print)."""
     if disp.proc.state == ProcState.UP_TO_DATE:
@@ -100,12 +109,7 @@ def _format_completed_line_markup(disp: Displayable) -> str:
         status = "[bold red]🚫[/bold red]"
     else:
         status = "[bold red]✗[/bold red]"
-    name_escaped = escape(disp.proc.name or "")
-    if disp.proc.log_filename:
-        abs_path = os.path.abspath(disp.proc.log_filename)
-        name_part = f"[link=file://{abs_path}]{name_escaped}[/link]"
-    else:
-        name_part = name_escaped
+    name_part = _proc_name_markup(disp.proc)
     time_escaped = escape(disp.execution_time)
     err_msg = _get_error_type_message(disp)
     err_escaped = escape(err_msg)
@@ -165,11 +169,11 @@ class Term:
         self.console.print(f'[bold cyan]![/bold cyan] {message}')
 
     def _get_description(self, proc: Proc) -> str:
-        """Get description text for a process."""
-        name = proc.name or ""
+        """Rich markup for progress row: linked proc name (same as completed lines) plus optional more_info."""
+        base = _proc_name_markup(proc)
         if proc.more_info:
-            name += f" - {proc.more_info}"
-        return name
+            return f"{base} - {escape(proc.more_info)}"
+        return base
 
     def completed_proc(self, p: Proc) -> None:
         self.start_proc(p)
@@ -254,7 +258,8 @@ class Term:
             more_info = ' - ' + more_info
 
         err_msg = _get_error_type_message(disp)
-        self.console.print(f'{status} {disp.proc.name}{more_info}{err_msg}')
+        line = f'{status} {_proc_name_markup(disp.proc)}{escape(more_info)}{escape(err_msg)}'
+        self.console.print(Text.from_markup(line))
 
         if disp.chunks:
             for chunk in disp.chunks:

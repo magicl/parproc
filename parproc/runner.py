@@ -80,6 +80,8 @@ class MultiProcessRunner:
         for l in proc.locks:
             manager.locks[l] = proc
 
+        if proc.name is not None:
+            proc.log_filename = manager.get_log_filename(proc.name)
         manager.term.start_proc(proc)
         proc.process = self._ctx.Process(
             target=proc.func,
@@ -186,6 +188,8 @@ class SingleProcessRunner:
         for l in proc.locks:
             manager.locks[l] = proc
 
+        if proc.name is not None:
+            proc.log_filename = manager.get_log_filename(proc.name)
         manager.term.start_proc(proc)
 
         sync_channel = SyncChannel(manager.handle_sync_request)
