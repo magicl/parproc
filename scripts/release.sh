@@ -110,10 +110,10 @@ mkdir -p build dist
 uv build
 
 # Sanity-check before upload
-uv run twine check dist/*
+uv run --extra build twine check dist/*
 
 # Upload; uses API token from ~/.pypirc
-uv run twine upload dist/*
+uv run --extra build twine upload dist/*
 
 uploaded_version="$(get_project_version)"
 tag_uploaded_version "${uploaded_version}"
