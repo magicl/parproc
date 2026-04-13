@@ -90,7 +90,7 @@ def _get_error_type_message(disp: Displayable) -> str:
 
 def _proc_name_markup(proc: Proc) -> str:
     """Escaped proc name with terminal file link when *log_filename* is set."""
-    name_escaped = escape(proc.name or "")
+    name_escaped = f"{escape(proc.name or '')}"
     if proc.log_filename:
         abs_path = os.path.abspath(proc.log_filename)
         return f"[link=file://{abs_path}]{name_escaped}[/link]"
