@@ -18,7 +18,7 @@ require_clean_git_state() {
     exit 1
   fi
 
-  git fetch --quiet
+  git fetch --quiet --tags
   ahead_count="$(git rev-list --count "@{upstream}..HEAD")"
   if [[ "${ahead_count}" != "0" ]]; then
     echo "Error: branch has ${ahead_count} unpushed commit(s)." >&2
@@ -56,6 +56,7 @@ if not versions:
 
 latest_changelog = versions[0]
 
+subprocess.run(["git", "fetch", "--quiet", "--tags"], check=True)
 tags = subprocess.run(["git", "tag", "--list"], capture_output=True, text=True, check=True).stdout.splitlines()
 semver_tags: list[tuple[str, str]] = []
 for tag in tags:
@@ -94,9 +95,20 @@ tag_uploaded_version() {
     exit 1
   fi
 
-  git tag "${version}"
+  if git ls-remote --tags origin "refs/tags/${version}" | grep -q .; then
+    echo "Error: remote tag '${version}' already exists on origin." >&2
+    exit 1
+  fi
+
+  git tag -a "${version}" -m "Release ${version}"
+  git push origin "${version}"
   echo "Created tag ${version}"
-  echo "Remember to push: git push origin ${version}"
+  echo "Pushed tag ${version} to origin"
+}
+
+upload_release() {
+  # Upload must succeed before we create/push a git tag.
+  uv run --extra build twine upload dist/*
 }
 
 require_clean_git_state
@@ -112,8 +124,8 @@ uv build
 # Sanity-check before upload
 uv run --extra build twine check dist/*
 
-# Upload; uses API token from ~/.pypirc
-uv run --extra build twine upload dist/*
-
-uploaded_version="$(get_project_version)"
-tag_uploaded_version "${uploaded_version}"
+# Upload + tag only on successful upload
+if upload_release; then
+  uploaded_version="$(get_project_version)"
+  tag_uploaded_version "${uploaded_version}"
+fi

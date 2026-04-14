@@ -3,6 +3,16 @@
 All notable user-facing changes to parproc will be documented in this file.
 
 
+## [0.6.5]
+
+### Changed
+- Public typing is now provided inline in library code for the exported API (`Proc`, `Proto`, `ProcContext`, `ProcManager`, and module-level helpers), replacing the previous `__init__.pyi` stub approach.
+- Packaging metadata now ships `py.typed` as a full typing marker (not partial), so type checkers consume inline annotations directly.
+
+### Fixed
+- `scripts/release.sh` now fetches tags when validating release order and pushes the created version tag to `origin`, so releases are tagged in the remote repository as part of the release flow.
+
+
 ## [0.6.4]
 
 ### Changed
