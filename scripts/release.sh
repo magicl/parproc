@@ -12,7 +12,7 @@ require_clean_git_state() {
     exit 1
   fi
 
-  # Ensure branch has an upstream and is not ahead (unpushed commits).
+  # Ensure branch has an upstream and is fully in sync with origin.
   if ! git rev-parse --abbrev-ref --symbolic-full-name "@{upstream}" >/dev/null 2>&1; then
     echo "Error: current branch has no upstream. Set upstream before release." >&2
     exit 1
@@ -20,8 +20,13 @@ require_clean_git_state() {
 
   git fetch --quiet --tags
   ahead_count="$(git rev-list --count "@{upstream}..HEAD")"
+  behind_count="$(git rev-list --count "HEAD..@{upstream}")"
   if [[ "${ahead_count}" != "0" ]]; then
     echo "Error: branch has ${ahead_count} unpushed commit(s)." >&2
+    exit 1
+  fi
+  if [[ "${behind_count}" != "0" ]]; then
+    echo "Error: branch is behind upstream by ${behind_count} commit(s)." >&2
     exit 1
   fi
 }
