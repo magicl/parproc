@@ -15,7 +15,7 @@ import traceback
 from collections import OrderedDict
 from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import Any, Optional, TypeVar, Union
+from typing import Any, Optional, TypeVar, Union, cast
 
 BaseModel: type[Any] | None = None
 try:
@@ -57,6 +57,9 @@ F = TypeVar('F', bound=Callable[..., Any])
 DepSpec = str
 DepSpecOrList = Union[str, list[str]]
 DepInput = Union[str, Callable[..., DepSpecOrList]]
+FileSpec = str | Callable[..., list[str]]
+ArgChoices = dict[str, Sequence[Any]]
+ArgChoicesFn = Callable[..., ArgChoices]
 
 # Default separator between proto name and params (and between params). The actual value is
 # the ProcManager option name_param_separator (set via set_options); this constant is the default.
@@ -121,7 +124,7 @@ class ProcManager:  # pylint: disable=too-many-public-methods
 
     inst: Optional['ProcManager'] = None  # Singleton instance
 
-    def __init__(self):
+    def __init__(self) -> None:
         _install_signal_handlers()
         self.logger = logger
         self.pending_now: list[str] = []
@@ -139,13 +142,13 @@ class ProcManager:  # pylint: disable=too-many-public-methods
         self.allow_missing_deps = True
         self.task_db_path: str | None = None
         self.name_param_separator = '::'
-        self.global_inputs_ignore: list[str | Callable[..., list[str]]] | None = None
+        self.global_inputs_ignore: list[FileSpec] | None = None
         self.watch = False
         self.watch_debounce_seconds = 0.3
         self._full: bool = False
         self._file_watcher = FileWatcher(watch_enabled=False, change_grace_period_seconds=self.watch_debounce_seconds)
 
-    def clear(self):
+    def clear(self) -> None:
         logger.debug('----------------CLEAR----------------------')
         self.parallel = 100
         self.procs: OrderedDict[str, 'Proc'] = OrderedDict()  # For consistent execution order
@@ -195,10 +198,11 @@ class ProcManager:  # pylint: disable=too-many-public-methods
         mode: str | None = None,
         debug: bool | None = None,
         allow_missing_deps: bool | None = None,
-        task_db_path: str | None = _TASK_DB_PATH_UNSET,
+        task_db_path: str | None = cast(str | None, _TASK_DB_PATH_UNSET),
         name_param_separator: str | None = None,
-        global_inputs_ignore: list[str | Callable[..., list[str]]] | Callable[..., list[str]] | None = (
-            _GLOBAL_INPUTS_IGNORE_UNSET
+        global_inputs_ignore: Sequence[FileSpec] | Callable[..., list[str]] | None = cast(
+            Sequence[FileSpec] | Callable[..., list[str]] | None,
+            _GLOBAL_INPUTS_IGNORE_UNSET,
         ),
         watch: bool | None = None,  # pylint: disable=redefined-outer-name
         watch_debounce_seconds: float | None = None,
@@ -245,9 +249,13 @@ class ProcManager:  # pylint: disable=too-many-public-methods
         if name_param_separator is not None:
             self.name_param_separator = name_param_separator
         if global_inputs_ignore is not ProcManager._GLOBAL_INPUTS_IGNORE_UNSET:
-            normalized_global_inputs_ignore: list[str | Callable[..., list[str]]] | None = (
-                [global_inputs_ignore] if callable(global_inputs_ignore) else global_inputs_ignore
-            )
+            normalized_global_inputs_ignore: list[FileSpec] | None
+            if callable(global_inputs_ignore):
+                normalized_global_inputs_ignore = [global_inputs_ignore]
+            elif global_inputs_ignore is None:
+                normalized_global_inputs_ignore = None
+            else:
+                normalized_global_inputs_ignore = list(global_inputs_ignore)
             if normalized_global_inputs_ignore is not None:
                 for spec in normalized_global_inputs_ignore:
                     if not isinstance(spec, str) and not callable(spec):
@@ -1765,8 +1773,6 @@ class ProcManager:  # pylint: disable=too-many-public-methods
                 return False
 
         for d in proc.deps:
-            if not isinstance(d, str):
-                continue
             if d not in self.procs:
                 if not self.allow_missing_deps:
                     raise UserError(
@@ -2142,7 +2148,7 @@ class DepProcContext:
     - args: Arguments specific to this proc (filtered from proto args)
     """
 
-    def __init__(self, proc_name: str, params: dict[str, Any], args: dict[str, Any]):
+    def __init__(self, proc_name: str, params: dict[str, Any], args: dict[str, Any]) -> None:
         self.proc_name = proc_name
         self.params = params
         self.args = args
@@ -2244,13 +2250,13 @@ class Proto:
         args: dict[str, Any] | None = None,
         timeout: float | None = None,
         wave: int = 0,
-        arg_choices: dict[str, Sequence[Any]] | Callable[..., dict[str, Sequence[Any]]] | None = None,
-        inputs: list[str | Callable[..., list[str]]] | Callable[..., list[str]] | None = None,
-        inputs_ignore: list[str | Callable[..., list[str]]] | Callable[..., list[str]] | None = None,
-        outputs: list[str | Callable[..., list[str]]] | Callable[..., list[str]] | None = None,
+        arg_choices: ArgChoices | ArgChoicesFn | None = None,
+        inputs: Sequence[FileSpec] | Callable[..., list[str]] | None = None,
+        inputs_ignore: Sequence[FileSpec] | Callable[..., list[str]] | None = None,
+        outputs: Sequence[FileSpec] | Callable[..., list[str]] | None = None,
         log_ignore: list[str | LogIssueRule] | str | LogIssueRule | None = None,
         no_skip: bool = False,
-    ):
+    ) -> None:
         # Input properties
         self.name = name
         # Validate deps is a sequence (not a function or other type)
@@ -2273,18 +2279,34 @@ class Proto:
         self.timeout = timeout
         self.wave = wave
         if arg_choices is None:
-            self.arg_choices: dict[str, Sequence[Any]] | Callable[..., dict[str, Sequence[Any]]] | None = None
+            self.arg_choices: ArgChoices | ArgChoicesFn | None = None
         elif callable(arg_choices):
             self.arg_choices = arg_choices
         else:
             self.arg_choices = dict(arg_choices)
         # special_deps are stored inside deps; extracted when resolving
         self.special_deps: list[SpecialDep] = [d for d in _deps if isinstance(d, SpecialDep)]
-        normalized_inputs: list[str | Callable[..., list[str]]] | None = [inputs] if callable(inputs) else inputs
-        normalized_inputs_ignore: list[str | Callable[..., list[str]]] | None = (
-            [inputs_ignore] if callable(inputs_ignore) else inputs_ignore
-        )
-        normalized_outputs: list[str | Callable[..., list[str]]] | None = [outputs] if callable(outputs) else outputs
+        normalized_inputs: list[FileSpec] | None
+        if callable(inputs):
+            normalized_inputs = [inputs]
+        elif inputs is None:
+            normalized_inputs = None
+        else:
+            normalized_inputs = list(inputs)
+        normalized_inputs_ignore: list[FileSpec] | None
+        if callable(inputs_ignore):
+            normalized_inputs_ignore = [inputs_ignore]
+        elif inputs_ignore is None:
+            normalized_inputs_ignore = None
+        else:
+            normalized_inputs_ignore = list(inputs_ignore)
+        normalized_outputs: list[FileSpec] | None
+        if callable(outputs):
+            normalized_outputs = [outputs]
+        elif outputs is None:
+            normalized_outputs = None
+        else:
+            normalized_outputs = list(outputs)
         normalized_log_ignore: list[str | LogIssueRule] | None
         if isinstance(log_ignore, (str, LogIssueRule)):
             normalized_log_ignore = [log_ignore]
@@ -2582,8 +2604,32 @@ def watch(*watch_names: str) -> None:  # pylint: disable=too-many-branches
         watcher.stop()
 
 
-def set_options(**kwargs: Any) -> None:
-    return ProcManager.get_inst().set_options(**kwargs)
+def set_options(
+    parallel: int | None = None,
+    dynamic: bool | None = None,
+    mode: str | None = None,
+    debug: bool | None = None,
+    allow_missing_deps: bool | None = None,
+    task_db_path: str | None = None,
+    name_param_separator: str | None = None,
+    global_inputs_ignore: Sequence[FileSpec] | Callable[..., list[str]] | None = None,
+    watch: bool | None = None,  # pylint: disable=redefined-outer-name
+    watch_debounce_seconds: float | None = None,
+    full_log_on_failure: bool | None = None,
+) -> None:
+    ProcManager.get_inst().set_options(
+        parallel=parallel,
+        dynamic=dynamic,
+        mode=mode,
+        debug=debug,
+        allow_missing_deps=allow_missing_deps,
+        task_db_path=task_db_path,
+        name_param_separator=name_param_separator,
+        global_inputs_ignore=global_inputs_ignore,
+        watch=watch,
+        watch_debounce_seconds=watch_debounce_seconds,
+        full_log_on_failure=full_log_on_failure,
+    )
 
 
 def get_procs() -> dict[str, Proc]:

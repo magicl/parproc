@@ -3,8 +3,8 @@
 import logging
 import os
 import re
-from collections.abc import Callable
-from typing import Any, TypeVar
+from collections.abc import Callable, Sequence
+from typing import TYPE_CHECKING, Any, TypeVar
 
 BaseModel: type[Any] | None = None
 try:
@@ -28,10 +28,22 @@ from .types import (
 logger = logging.getLogger('par')
 
 F = TypeVar('F', bound=Callable[..., Any])
+FileSpec = str | Callable[..., list[str]]
+
+if TYPE_CHECKING:
+    from .par import Proto
 
 
 class ProcContext:
     """Context passed into a running proc (lives inside the proc process/thread)."""
+
+    proc_name: str
+    params: dict[str, Any]
+    results: dict[str, Any]
+    args: dict[str, Any]
+    deps_changed: bool
+    changed_deps: list[str]
+    input_fingerprint: dict[str, float] | None
 
     def __init__(
         self,
@@ -39,7 +51,7 @@ class ProcContext:
         context: dict[str, Any],
         queue_to_proc: Any,
         queue_to_master: Any,
-    ):
+    ) -> None:
         self.proc_name = proc_name
         self.results = context['results']
         self.params = context['params']
@@ -123,24 +135,26 @@ class Proc:
         name: str | None = None,
         f: F | None = None,
         *,
-        deps: list[str] | list[str | SpecialDep] | None = None,
+        deps: Sequence[str | SpecialDep] | None = None,
         rdeps: list[str | RdepRule] | None = None,
         locks: list[str] | None = None,
         now: bool = False,
         args: dict[str, Any] | None = None,
-        proto: Any = None,
+        proto: 'Proto | None' = None,
         timeout: float | None = None,
         wave: int = 0,
         special_deps: list[SpecialDep] | None = None,
-        inputs: list[str | Callable[..., list[str]]] | Callable[..., list[str]] | None = None,
-        inputs_ignore: list[str | Callable[..., list[str]]] | Callable[..., list[str]] | None = None,
-        outputs: list[str | Callable[..., list[str]]] | Callable[..., list[str]] | None = None,
+        inputs: Sequence[FileSpec] | Callable[..., list[str]] | None = None,
+        inputs_ignore: Sequence[FileSpec] | Callable[..., list[str]] | None = None,
+        outputs: Sequence[FileSpec] | Callable[..., list[str]] | None = None,
         log_ignore: list[str | LogIssueRule] | str | LogIssueRule | None = None,
         no_skip: bool = False,
-    ):
+    ) -> None:
+        self.deps: list[str]
+        self.special_deps: list[SpecialDep]
         if special_deps is not None:
-            self.deps = deps if deps is not None else []
-            self.special_deps = special_deps
+            self.deps = [d for d in (deps if deps is not None else []) if isinstance(d, str)]
+            self.special_deps = list(special_deps)
         else:
             _deps = deps if deps is not None else []
             self.deps = [d for d in _deps if isinstance(d, str)]
@@ -156,11 +170,27 @@ class Proc:
         self.proto = proto
         self.timeout = timeout
         self.wave = proto.wave if proto is not None else wave
-        normalized_inputs: list[str | Callable[..., list[str]]] | None = [inputs] if callable(inputs) else inputs
-        normalized_inputs_ignore: list[str | Callable[..., list[str]]] | None = (
-            [inputs_ignore] if callable(inputs_ignore) else inputs_ignore
-        )
-        normalized_outputs: list[str | Callable[..., list[str]]] | None = [outputs] if callable(outputs) else outputs
+        normalized_inputs: list[FileSpec] | None
+        if callable(inputs):
+            normalized_inputs = [inputs]
+        elif inputs is None:
+            normalized_inputs = None
+        else:
+            normalized_inputs = list(inputs)
+        normalized_inputs_ignore: list[FileSpec] | None
+        if callable(inputs_ignore):
+            normalized_inputs_ignore = [inputs_ignore]
+        elif inputs_ignore is None:
+            normalized_inputs_ignore = None
+        else:
+            normalized_inputs_ignore = list(inputs_ignore)
+        normalized_outputs: list[FileSpec] | None
+        if callable(outputs):
+            normalized_outputs = [outputs]
+        elif outputs is None:
+            normalized_outputs = None
+        else:
+            normalized_outputs = list(outputs)
         normalized_log_ignore: list[str | LogIssueRule] | None
         if isinstance(log_ignore, (str, LogIssueRule)):
             normalized_log_ignore = [log_ignore]
