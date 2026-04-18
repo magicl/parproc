@@ -104,7 +104,10 @@ def _format_completed_line_markup(disp: Displayable) -> str:
     if disp.proc.state == ProcState.UP_TO_DATE:
         status = "[bold green]↷[/bold green]"  # up-to-date (auto-skipped)
     elif disp.proc.state == ProcState.SKIPPED:
-        status = "[bold yellow]⊘[/bold yellow]"  # skipped
+        if getattr(disp.proc, "error", None) == Proc.ERROR_NO_CHANGE:
+            status = "[bold green]↷[/bold green]"  # no change
+        else:
+            status = "[bold yellow]⊘[/bold yellow]"  # skipped
     elif disp.proc.state == ProcState.SUCCEEDED:
         status = "[bold green]✓[/bold green]"
     elif disp.proc.state == ProcState.FAILED_DEP:
@@ -241,7 +244,10 @@ class Term:
         if disp.proc.state == ProcState.UP_TO_DATE:
             status = "[bold green]↷[/bold green]"  # up-to-date
         elif disp.proc.state == ProcState.SKIPPED:
-            status = "[bold yellow]⊘[/bold yellow]"  # skipped
+            if getattr(disp.proc, "error", None) == Proc.ERROR_NO_CHANGE:
+                status = "[bold green]↷[/bold green]"  # no change
+            else:
+                status = "[bold yellow]⊘[/bold yellow]"  # skipped
         elif disp.proc.state == ProcState.SUCCEEDED:
             status = "[bold green]✓[/bold green]"
         elif disp.proc.state == ProcState.FAILED_DEP:

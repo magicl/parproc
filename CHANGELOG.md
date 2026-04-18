@@ -3,6 +3,12 @@
 All notable user-facing changes to parproc will be documented in this file.
 
 
+## [0.6.8]
+
+### Changed
+- `ProcNoChangeError` tasks now use the same `↷` no-change icon as other unchanged/up-to-date outcomes in terminal rendering.
+
+
 ## [0.6.7]
 
 ### Added
