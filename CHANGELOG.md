@@ -3,6 +3,20 @@
 All notable user-facing changes to parproc will be documented in this file.
 
 
+## [0.6.6]
+
+### Added
+- New per-output expectation spec `pp.Output(file=..., max_age=...)` for `Proc(..., outputs=...)` and `Proto(..., outputs=...)`.
+- `Output.max_age` duration parsing now accepts numeric seconds (`int`/`float`), `datetime.timedelta`, and string units like `4s`, `4m`, `4h`, `4d` (including word forms like `4 minutes`).
+
+### Changed
+- `outputs` now supports strings, `pp.Output(...)`, and callables returning either form (including mixed lists).
+- Incremental staleness checks now treat outputs with `max_age` as stale when they are older than `now - max_age`.
+
+### Fixed
+- Post-run output verification now also fails procs when declared outputs exceed `max_age`, not just when outputs are missing.
+
+
 ## [0.6.5]
 
 ### Changed

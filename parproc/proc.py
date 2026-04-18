@@ -18,17 +18,20 @@ from .types import (
     FAILED_STATES,
     SUCCEEDED_STATES,
     LogIssueRule,
+    Output,
     ProcessError,
     ProcState,
     RdepRule,
     SpecialDep,
     UserError,
+    parse_duration_spec,
 )
 
 logger = logging.getLogger('par')
 
 F = TypeVar('F', bound=Callable[..., Any])
 FileSpec = str | Callable[..., list[str]]
+OutputFileSpec = str | Output | Callable[..., list[str | Output]]
 
 if TYPE_CHECKING:
     from .par import Proto
@@ -146,7 +149,7 @@ class Proc:
         special_deps: list[SpecialDep] | None = None,
         inputs: Sequence[FileSpec] | Callable[..., list[str]] | None = None,
         inputs_ignore: Sequence[FileSpec] | Callable[..., list[str]] | None = None,
-        outputs: Sequence[FileSpec] | Callable[..., list[str]] | None = None,
+        outputs: Sequence[OutputFileSpec] | Callable[..., list[str | Output]] | None = None,
         log_ignore: list[str | LogIssueRule] | str | LogIssueRule | None = None,
         no_skip: bool = False,
     ) -> None:
@@ -184,13 +187,26 @@ class Proc:
             normalized_inputs_ignore = None
         else:
             normalized_inputs_ignore = list(inputs_ignore)
-        normalized_outputs: list[FileSpec] | None
+        normalized_outputs: list[OutputFileSpec] | None
         if callable(outputs):
             normalized_outputs = [outputs]
         elif outputs is None:
             normalized_outputs = None
         else:
             normalized_outputs = list(outputs)
+        if normalized_outputs is not None:
+            for spec in normalized_outputs:
+                if isinstance(spec, str) or callable(spec):
+                    continue
+                if isinstance(spec, Output):
+                    if not spec.file:
+                        raise UserError('Output.file must be a non-empty string.')
+                    if spec.max_age is not None:
+                        parse_duration_spec(spec.max_age, label='Output.max_age')
+                    continue
+                raise UserError(
+                    'Proc outputs must contain str, Output, or callable values, ' f'got {type(spec).__name__!r}.'
+                )
         normalized_log_ignore: list[str | LogIssueRule] | None
         if isinstance(log_ignore, (str, LogIssueRule)):
             normalized_log_ignore = [log_ignore]

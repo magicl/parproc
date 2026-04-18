@@ -9,6 +9,7 @@ import tempfile
 import threading
 import time
 import unittest
+from datetime import timedelta
 from typing import Any
 from unittest.mock import patch
 
@@ -368,6 +369,70 @@ class TestOutputVerification(IncrementalBaseTest):
         pp.wait_for_all()
         procs = pp.get_procs()
         self.assertEqual(procs['build'].state, ProcState.SUCCEEDED)
+
+    def test_reruns_when_output_is_older_than_max_age(self) -> None:
+        src = self._write_file('src.txt', 'v1')
+        output_path = os.path.join(self._tmpdir, 'output.txt')
+
+        @pp.Proto(name='build', inputs=[src], outputs=[pp.Output(file=output_path, max_age='1h')])
+        def build(ctx: pp.ProcContext) -> str:
+            with open(output_path, 'w', encoding='utf-8') as f:
+                f.write('result_v1')
+            return 'built_v1'
+
+        pp.run('build')
+        pp.wait_for_all()
+        self.assertEqual(pp.results()['build'], 'built_v1')
+
+        old_seconds = time.time() - 7200.0
+        os.utime(output_path, (old_seconds, old_seconds))
+
+        pp.clear()
+        pp.set_options(mode=_test_mode(), dynamic=False, task_db_path=self._db_path)
+
+        @pp.Proto(name='build', inputs=[src], outputs=[pp.Output(file=output_path, max_age=timedelta(hours=1))])
+        def build2(ctx: pp.ProcContext) -> str:
+            with open(output_path, 'w', encoding='utf-8') as f:
+                f.write('result_v2')
+            return 'built_v2'
+
+        pp.run('build')
+        pp.wait_for_all()
+        procs = pp.get_procs()
+        self.assertEqual(procs['build'].state, ProcState.SUCCEEDED)
+        self.assertEqual(pp.results()['build'], 'built_v2')
+
+    def test_fails_when_output_remains_older_than_max_age_after_run(self) -> None:
+        output_path = os.path.join(self._tmpdir, 'output.txt')
+
+        @pp.Proto(name='build', outputs=[pp.Output(file=output_path, max_age='1s')])
+        def build(ctx: pp.ProcContext) -> str:
+            with open(output_path, 'w', encoding='utf-8') as f:
+                f.write('result')
+            old_seconds = time.time() - 3600.0
+            os.utime(output_path, (old_seconds, old_seconds))
+            return 'built'
+
+        pp.run('build')
+        ok = pp.wait_for_all(exception_on_failure=False)
+        self.assertFalse(ok)
+        procs = pp.get_procs()
+        self.assertEqual(procs['build'].state, ProcState.FAILED)
+        self.assertEqual(procs['build'].error, pp.Proc.ERROR_OUTPUTS_NOT_REFRESHED)
+        self.assertIn('older than max_age', procs['build'].more_info)
+
+    def test_accepts_duration_words_for_output_max_age(self) -> None:
+        output_path = os.path.join(self._tmpdir, 'output.txt')
+
+        @pp.Proto(name='build', outputs=[pp.Output(file=output_path, max_age='1 minutes')])
+        def build(ctx: pp.ProcContext) -> str:
+            with open(output_path, 'w', encoding='utf-8') as f:
+                f.write('result')
+            return 'built'
+
+        pp.run('build')
+        pp.wait_for_all()
+        self.assertEqual(pp.results()['build'], 'built')
 
 
 class TestNoTaskDb(IncrementalBaseTest):

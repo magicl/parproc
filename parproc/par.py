@@ -14,6 +14,7 @@ import time
 import traceback
 from collections import OrderedDict
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional, TypeVar, Union, cast
 
@@ -33,6 +34,7 @@ from .types import (
     FAILED_STATES,
     SUCCEEDED_STATES,
     LogIssueRule,
+    Output,
     ProcessError,
     ProcFailedError,
     ProcSkippedError,
@@ -42,6 +44,7 @@ from .types import (
     UserError,
     WhenScheduled,
     WhenTargetScheduled,
+    parse_duration_spec,
 )
 from .watcher import FileWatcher
 
@@ -58,6 +61,8 @@ DepSpec = str
 DepSpecOrList = Union[str, list[str]]
 DepInput = Union[str, Callable[..., DepSpecOrList]]
 FileSpec = str | Callable[..., list[str]]
+OutputFile = str | Output
+OutputSpec = OutputFile | Callable[..., list[OutputFile]]
 ArgChoices = dict[str, Sequence[Any]]
 ArgChoicesFn = Callable[..., ArgChoices]
 
@@ -118,6 +123,12 @@ def _flatten_names(names: list[str] | list[str | list[str]]) -> list[str]:
         else:
             out.append(n)
     return out
+
+
+@dataclass(frozen=True)
+class ResolvedOutput:
+    path: str
+    max_age_seconds: float | None
 
 
 class ProcManager:  # pylint: disable=too-many-public-methods
@@ -954,11 +965,43 @@ class ProcManager:  # pylint: disable=too-many-public-methods
         """Resolve proc inputs to watch paths plus ignored paths/patterns."""
         return self._resolve_input_watch_paths(proc)
 
-    def _resolve_outputs(self, proc: 'Proc') -> list[str]:
-        """Resolve output globs/callables to concrete file paths."""
+    def _resolve_outputs(self, proc: 'Proc') -> list[ResolvedOutput]:
+        """Resolve output specs/callables to concrete paths plus optional freshness policy."""
         if proc.outputs is None:
             return []
-        return self._resolve_file_specs(proc.outputs, proc)
+        raw_outputs: list[OutputFile] = []
+        for spec in proc.outputs:
+            if isinstance(spec, (str, Output)):
+                raw_outputs.append(spec)
+                continue
+            dep_context = DepProcContext(
+                proc_name=proc.name or '',
+                params=self.context['params'],
+                args=proc.args,
+            )
+            sig = inspect.signature(spec)
+            param_names = list(sig.parameters.keys())
+            if param_names:
+                param_names = param_names[1:]
+            filtered = {k: v for k, v in proc.args.items() if k in param_names}
+            result = spec(dep_context, **filtered)
+            raw_outputs.extend(result)
+
+        resolved: list[ResolvedOutput] = []
+        for out in raw_outputs:
+            output_spec = out if isinstance(out, Output) else Output(file=out)
+            max_age_seconds = (
+                parse_duration_spec(output_spec.max_age, label='Output.max_age')
+                if output_spec.max_age is not None
+                else None
+            )
+            path = output_spec.file
+            if '*' in path or '?' in path or '[' in path:
+                for resolved_path in sorted(globmod.glob(path, recursive=True)):
+                    resolved.append(ResolvedOutput(path=resolved_path, max_age_seconds=max_age_seconds))
+            else:
+                resolved.append(ResolvedOutput(path=path, max_age_seconds=max_age_seconds))
+        return resolved
 
     def _compute_fingerprint(self, paths: list[str], ignored_paths: list[str] | None = None) -> dict[str, float]:
         """Map each path to mtime_ns via FileWatcher cache."""
@@ -1008,10 +1051,19 @@ class ProcManager:  # pylint: disable=too-many-public-methods
                 return True
 
         if proc.outputs is not None:
+            now_ns = time.time_ns()
             resolved_outputs = self._resolve_outputs(proc)
-            for out_path in resolved_outputs:
+            for output in resolved_outputs:
+                out_path = output.path
                 if not self._file_watcher.path_exists(out_path):
                     return True
+                if output.max_age_seconds is not None:
+                    mtime_ns = self._file_watcher.path_mtime_ns(out_path)
+                    if mtime_ns is None:
+                        return True
+                    max_age_ns = int(output.max_age_seconds * 1_000_000_000)
+                    if now_ns - int(mtime_ns) > max_age_ns:
+                        return True
 
         return False
 
@@ -1034,16 +1086,35 @@ class ProcManager:  # pylint: disable=too-many-public-methods
         """
         if proc.outputs is None:
             return True
+        now_ns = time.time_ns()
         resolved = self._resolve_outputs(proc)
         missing: list[str] = []
-        for out_path in resolved:
+        too_old: list[str] = []
+        for output in resolved:
+            out_path = output.path
             if not self._file_watcher.path_exists(out_path):
                 missing.append(out_path)
+                continue
+            if output.max_age_seconds is None:
+                continue
+            mtime_ns = self._file_watcher.path_mtime_ns(out_path, refresh=True)
+            if mtime_ns is None:
+                missing.append(out_path)
+                continue
+            max_age_ns = int(output.max_age_seconds * 1_000_000_000)
+            if now_ns - int(mtime_ns) > max_age_ns:
+                too_old.append(out_path)
         if missing:
             proc.state = ProcState.FAILED
             proc.error = Proc.ERROR_OUTPUTS_NOT_REFRESHED
             proc.more_info = f'outputs not refreshed: {", ".join(missing)}'
             logger.warning('proc "%s": declared outputs not refreshed: %s', proc.name, missing)
+            return False
+        if too_old:
+            proc.state = ProcState.FAILED
+            proc.error = Proc.ERROR_OUTPUTS_NOT_REFRESHED
+            proc.more_info = f'outputs older than max_age: {", ".join(too_old)}'
+            logger.warning('proc "%s": declared outputs older than max_age: %s', proc.name, too_old)
             return False
         return True
 
@@ -2253,7 +2324,7 @@ class Proto:
         arg_choices: ArgChoices | ArgChoicesFn | None = None,
         inputs: Sequence[FileSpec] | Callable[..., list[str]] | None = None,
         inputs_ignore: Sequence[FileSpec] | Callable[..., list[str]] | None = None,
-        outputs: Sequence[FileSpec] | Callable[..., list[str]] | None = None,
+        outputs: Sequence[OutputSpec] | Callable[..., list[OutputFile]] | None = None,
         log_ignore: list[str | LogIssueRule] | str | LogIssueRule | None = None,
         no_skip: bool = False,
     ) -> None:
@@ -2300,13 +2371,26 @@ class Proto:
             normalized_inputs_ignore = None
         else:
             normalized_inputs_ignore = list(inputs_ignore)
-        normalized_outputs: list[FileSpec] | None
+        normalized_outputs: list[OutputSpec] | None
         if callable(outputs):
             normalized_outputs = [outputs]
         elif outputs is None:
             normalized_outputs = None
         else:
             normalized_outputs = list(outputs)
+        if normalized_outputs is not None:
+            for spec in normalized_outputs:
+                if isinstance(spec, str) or callable(spec):
+                    continue
+                if isinstance(spec, Output):
+                    if not spec.file:
+                        raise UserError('Output.file must be a non-empty string.')
+                    if spec.max_age is not None:
+                        parse_duration_spec(spec.max_age, label='Output.max_age')
+                    continue
+                raise UserError(
+                    'Proto outputs must contain str, Output, or callable values, ' f'got {type(spec).__name__!r}.'
+                )
         normalized_log_ignore: list[str | LogIssueRule] | None
         if isinstance(log_ignore, (str, LogIssueRule)):
             normalized_log_ignore = [log_ignore]

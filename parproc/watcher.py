@@ -227,6 +227,18 @@ class FileWatcher:
         with self._lock:
             return self._path_mtime(normalized_path) is not None
 
+    def path_mtime_ns(self, path: str, *, refresh: bool = False) -> float | None:
+        """Cached file mtime (nanoseconds) or None when missing.
+
+        When ``refresh=True``, force a fresh stat read and update caches.
+        """
+        normalized_path = os.path.abspath(path)
+        with self._lock:
+            if refresh:
+                self._mtime_cache.pop(normalized_path, None)
+                self._missing_cache.discard(normalized_path)
+            return self._path_mtime(normalized_path)
+
     def compute_fingerprint(self, paths: list[str], ignored_paths: list[str] | None = None) -> dict[str, float]:
         """Map each concrete file path to mtime_ns using cached stats."""
         ignored_abs = {os.path.abspath(path) for path in (ignored_paths or [])}

@@ -1,6 +1,10 @@
 """Shared types and constants to avoid circular imports (e.g. term importing par)."""
 
+import re
+from dataclasses import dataclass
+from datetime import timedelta
 from enum import Enum
+from typing import Final
 
 
 class ProcState(Enum):
@@ -71,6 +75,79 @@ class IgnoreLogIfSucceeded(LogIssueRule):
 
     def applies(self, *, task_succeeded: bool) -> bool:
         return task_succeeded
+
+
+DurationSpec = float | int | str | timedelta
+
+
+@dataclass(frozen=True)
+class Output:
+    """Expected output specification for a proc.
+
+    Attributes:
+        file: File path (or glob pattern) that should exist after the proc runs.
+        max_age: Optional freshness requirement. If set, the output file must be
+            newer than ``now - max_age`` when checking staleness and output
+            verification.
+    """
+
+    file: str
+    max_age: DurationSpec | None = None
+
+
+_DURATION_UNITS: Final[dict[str, float]] = {
+    's': 1.0,
+    'sec': 1.0,
+    'secs': 1.0,
+    'second': 1.0,
+    'seconds': 1.0,
+    'm': 60.0,
+    'min': 60.0,
+    'mins': 60.0,
+    'minute': 60.0,
+    'minutes': 60.0,
+    'h': 3600.0,
+    'hr': 3600.0,
+    'hrs': 3600.0,
+    'hour': 3600.0,
+    'hours': 3600.0,
+    'd': 86400.0,
+    'day': 86400.0,
+    'days': 86400.0,
+}
+
+
+def parse_duration_spec(value: DurationSpec, *, label: str = 'duration') -> float:
+    """Parse a duration specification into seconds."""
+    if isinstance(value, timedelta):
+        seconds = value.total_seconds()
+        if seconds < 0:
+            raise UserError(f'{label} must be >= 0 seconds, got {value!r}.')
+        return seconds
+    if isinstance(value, (int, float)):
+        seconds = float(value)
+        if seconds < 0:
+            raise UserError(f'{label} must be >= 0 seconds, got {value!r}.')
+        return seconds
+    if isinstance(value, str):
+        raw = value.strip()
+        match = re.fullmatch(r'(?P<num>\d+(?:\.\d+)?)\s*(?P<unit>[A-Za-z]+)', raw)
+        if match is None:
+            raise UserError(
+                f'Invalid {label} {value!r}. Expected a number of seconds or strings like "4s", "4m", "4h", "4d".'
+            )
+        unit_key = match.group('unit').lower()
+        if unit_key not in _DURATION_UNITS:
+            allowed_units = ', '.join(sorted(_DURATION_UNITS.keys()))
+            raise UserError(f'Invalid {label} unit {unit_key!r}. Allowed units: {allowed_units}.')
+        seconds = float(match.group('num')) * _DURATION_UNITS[unit_key]
+        if seconds < 0:
+            raise UserError(f'{label} must be >= 0 seconds, got {value!r}.')
+        return seconds
+    raise UserError(
+        f'Invalid {label} type {type(value).__name__!r}. '
+        'Expected float|int seconds, datetime.timedelta, or strings like "4s"/"4m"/"4h"/"4d".'
+    )
 
 
 class WhenScheduled(RdepRule):
