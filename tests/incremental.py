@@ -338,6 +338,30 @@ class TestDepsChanged(IncrementalBaseTest):
         with open(marker_path, encoding='utf-8') as f:
             self.assertEqual(f.read(), '0')
 
+    def test_deps_changed_false_when_dep_raises_no_change(self) -> None:
+        marker_path = os.path.join(self._tmpdir, '_deps_changed')
+        tmpdir = self._tmpdir
+
+        @pp.Proto(name='build')
+        def build(ctx: pp.ProcContext) -> str:
+            del ctx
+            raise pp.ProcNoChangeError()
+
+        @pp.Proto(name='test', deps=['build'], no_skip=True)
+        def test_proc(ctx: pp.ProcContext) -> str:
+            with open(os.path.join(tmpdir, '_deps_changed'), 'w', encoding='utf-8') as f:
+                f.write('1' if ctx.deps_changed else '0')
+            return 'tested'
+
+        pp.run('test')
+        pp.wait_for_all()
+        with open(marker_path, encoding='utf-8') as f:
+            self.assertEqual(f.read(), '0')
+
+        procs = pp.get_procs()
+        self.assertEqual(procs['build'].state, ProcState.SKIPPED)
+        self.assertEqual(procs['build'].error, pp.Proc.ERROR_NO_CHANGE)
+
 
 class TestOutputVerification(IncrementalBaseTest):
     """Test that declared outputs are verified after proc runs."""

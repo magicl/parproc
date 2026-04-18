@@ -132,6 +132,7 @@ class Proc:
     ERROR_FAILED = 5  # Proc raised ProcFailedError
     ERROR_SKIPPED = 6  # Proc raised ProcSkippedError
     ERROR_OUTPUTS_NOT_REFRESHED = 7  # Declared outputs were not created/refreshed by the proc
+    ERROR_NO_CHANGE = 8  # Proc raised ProcNoChangeError
 
     def __init__(
         self,

@@ -37,6 +37,7 @@ from .types import (
     Output,
     ProcessError,
     ProcFailedError,
+    ProcNoChangeError,
     ProcSkippedError,
     ProcState,
     RdepRule,
@@ -2088,7 +2089,7 @@ class ProcManager:  # pylint: disable=too-many-public-methods
         p.error = error
         if error == Proc.ERROR_NONE:
             p.state = ProcState.SUCCEEDED
-        elif error == Proc.ERROR_SKIPPED:
+        elif error in (Proc.ERROR_SKIPPED, Proc.ERROR_NO_CHANGE):
             p.state = ProcState.SKIPPED
         else:
             p.state = ProcState.FAILED
@@ -2159,6 +2160,9 @@ def run_task_with_redirect(
         try:
             try:
                 ret = user_func(pc, **pc.args)
+            except ProcNoChangeError:
+                # Ignore exception info
+                error = Proc.ERROR_NO_CHANGE
             except ProcSkippedError:
                 # Ignore exception info
                 error = Proc.ERROR_SKIPPED

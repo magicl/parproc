@@ -207,3 +207,7 @@ class ProcFailedError(Exception):
 
 class ProcSkippedError(Exception):
     """Raise from inside a proc to mark the task as skipped (ERROR_SKIPPED)."""
+
+
+class ProcNoChangeError(Exception):
+    """Raise from inside a proc to mark successful execution with no output change."""

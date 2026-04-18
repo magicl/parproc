@@ -64,6 +64,8 @@ def _has_ansi_color(text: str) -> bool:
 def _get_error_type_message(disp: Displayable) -> str:
     """Short message for error type when task failed; empty when succeeded or still running."""
     if disp.proc.state == ProcState.SKIPPED:
+        if getattr(disp.proc, "error", None) == Proc.ERROR_NO_CHANGE:
+            return " no change"
         return " skipped"
     if disp.proc.state == ProcState.UP_TO_DATE:
         return " up-to-date"

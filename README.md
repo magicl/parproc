@@ -123,7 +123,7 @@ IDLE  -->  WANTED  -->  RUNNING  -->  SUCCEEDED
 - **RUNNING** -- currently executing in a subprocess (or in-process in single mode).
 - **SUCCEEDED** -- completed successfully.
 - **FAILED** -- completed with an error (exception, timeout, dep failure, etc.).
-- **SKIPPED** -- the proc raised `ProcSkippedError`; counts as success for downstream deps.
+- **SKIPPED** -- the proc raised `ProcSkippedError` or `ProcNoChangeError`; counts as success for downstream deps.
 - **UP_TO_DATE** -- auto-skipped by the framework because all inputs and dependencies are unchanged since the last cached result. Counts as success for downstream deps. See [Incremental builds](#incremental-builds) below.
 
 ## Scheduling and execution
@@ -291,7 +291,7 @@ Every proc function receives a `ProcContext` as its first argument. It provides:
 - `context.args` -- arguments specific to this proc (from the proto pattern).
 - `context.proc_name` -- the name of the current proc.
 - `context.create(...)` / `context.start(...)` / `context.run(...)` / `context.wait(...)` -- create, start, run, or wait for other procs from within a running proc.
-- `context.deps_changed` -- `True` if any dependency proc was freshly executed (not `UP_TO_DATE` or `SKIPPED`). Useful for procs that want to do their own "should I do work?" logic.
+- `context.deps_changed` -- `True` if any dependency proc was freshly executed (not `UP_TO_DATE` or `SKIPPED`, including `ProcNoChangeError` cases). Useful for procs that want to do their own "should I do work?" logic.
 - `context.changed_deps` -- list of dependency names that were freshly executed.
 - `context.input_fingerprint` -- dict mapping resolved input file paths to their `mtime_ns` values, or `None` if no `inputs` are declared. Available for manual inspection.
 

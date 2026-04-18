@@ -3,6 +3,16 @@
 All notable user-facing changes to parproc will be documented in this file.
 
 
+## [0.6.7]
+
+### Added
+- New `ProcNoChangeError` for procs that execute successfully but determine that no meaningful output changed.
+
+### Changed
+- `ProcNoChangeError` now maps to successful unchanged semantics (`SKIPPED`) so downstream dependencies treat it as not changed.
+- Terminal status text now distinguishes this case as `no change`.
+
+
 ## [0.6.6]
 
 ### Added
