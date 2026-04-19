@@ -3,7 +3,7 @@ import logging
 from unittest import TestCase
 
 import parproc as pp
-from parproc.term import Term
+from parproc.term import Term, _parse_outputs_refresh_paths
 
 
 class ErrorFormatTest(TestCase):
@@ -138,3 +138,11 @@ line 3"""
         output = '\n'.join(chunk.content for chunk in chunks)
         self.assertNotIn('STDOUT:', output)
         self.assertIn('STDERR:', output)
+
+    def test_parse_outputs_not_refreshed_paths(self):
+        more_info = 'outputs not refreshed: /tmp/a.txt, /tmp/b.txt'
+        self.assertEqual(_parse_outputs_refresh_paths(more_info), ['/tmp/a.txt', '/tmp/b.txt'])
+
+    def test_parse_outputs_older_than_max_age_paths(self):
+        more_info = 'outputs older than max_age: /tmp/c.txt'
+        self.assertEqual(_parse_outputs_refresh_paths(more_info), ['/tmp/c.txt'])

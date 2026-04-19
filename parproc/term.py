@@ -90,6 +90,20 @@ def _get_error_type_message(disp: Displayable) -> str:
     return " failed"
 
 
+def _parse_outputs_refresh_paths(more_info: str | None) -> list[str]:
+    """Extract output paths from output-refresh failure messages."""
+    if not more_info:
+        return []
+    prefixes = ('outputs not refreshed:', 'outputs older than max_age:')
+    for prefix in prefixes:
+        if more_info.startswith(prefix):
+            raw_paths = more_info[len(prefix) :].strip()
+            if not raw_paths:
+                return []
+            return [path.strip() for path in raw_paths.split(',') if path.strip()]
+    return []
+
+
 def _proc_name_markup(proc: Proc) -> str:
     """Escaped proc name with terminal file link when *log_filename* is set."""
     name_escaped = f"{escape(proc.name or '')}"
@@ -187,7 +201,15 @@ class Term:
     def _print_completed_task(self, disp: Displayable) -> None:
         """Print a single completed task to the console (scrollback). Not part of the live update area."""
         self.console.print(_format_completed_line_markup(disp))
+        self._print_outputs_refresh_details(disp.proc)
         self._print_completed_task_log_panels([disp])
+
+    def _print_outputs_refresh_details(self, proc: Proc) -> None:
+        """Print per-output refresh details for output-refresh failures."""
+        if proc.error != Proc.ERROR_OUTPUTS_NOT_REFRESHED:
+            return
+        for out_path in _parse_outputs_refresh_paths(proc.more_info):
+            self.console.print(f'    {escape(out_path)}')
 
     def _log_panel_for_disp(self, disp: Displayable) -> Any:
         """Build the log panel renderable for a displayable that has chunks. Returns None if no chunks.
@@ -258,9 +280,13 @@ class Term:
             status = "[yellow]•[/yellow]"
 
         more_info = disp.proc.more_info
+        outputs_refresh_paths = _parse_outputs_refresh_paths(more_info)
         if disp.proc.state in FAILED_STATES:
             if more_info == '':
                 more_info = f'logfile: {disp.proc.log_filename}'
+            elif outputs_refresh_paths:
+                # Paths are rendered on dedicated lines below the task.
+                more_info = ''
 
         if more_info != '':
             more_info = ' - ' + more_info
@@ -268,6 +294,8 @@ class Term:
         err_msg = _get_error_type_message(disp)
         line = f'{status} {_proc_name_markup(disp.proc)}{escape(more_info)}{escape(err_msg)}'
         self.console.print(Text.from_markup(line))
+        for out_path in outputs_refresh_paths:
+            self.console.print(f'    {escape(out_path)}')
 
         if disp.chunks:
             for chunk in disp.chunks:

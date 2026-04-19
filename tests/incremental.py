@@ -458,6 +458,37 @@ class TestOutputVerification(IncrementalBaseTest):
         pp.wait_for_all()
         self.assertEqual(pp.results()['build'], 'built')
 
+    def test_output_can_skip_post_run_freshness_enforcement(self) -> None:
+        output_path = os.path.join(self._tmpdir, 'output.txt')
+
+        @pp.Proto(name='build', outputs=[pp.Output(file=output_path, max_age='1s', enforce_freshness=False)])
+        def build(ctx: pp.ProcContext) -> str:
+            with open(output_path, 'w', encoding='utf-8') as f:
+                f.write('result')
+            old_seconds = time.time() - 3600.0
+            os.utime(output_path, (old_seconds, old_seconds))
+            return 'built'
+
+        pp.run('build')
+        pp.wait_for_all()
+        procs = pp.get_procs()
+        self.assertEqual(procs['build'].state, ProcState.SUCCEEDED)
+        self.assertEqual(pp.results()['build'], 'built')
+
+    def test_output_still_must_exist_when_freshness_enforcement_disabled(self) -> None:
+        output_path = os.path.join(self._tmpdir, 'missing_output.txt')
+
+        @pp.Proto(name='build', outputs=[pp.Output(file=output_path, enforce_freshness=False)])
+        def build(ctx: pp.ProcContext) -> str:
+            return 'built'
+
+        pp.run('build')
+        ok = pp.wait_for_all(exception_on_failure=False)
+        self.assertFalse(ok)
+        procs = pp.get_procs()
+        self.assertEqual(procs['build'].state, ProcState.FAILED)
+        self.assertEqual(procs['build'].error, pp.Proc.ERROR_OUTPUTS_NOT_REFRESHED)
+
 
 class TestNoTaskDb(IncrementalBaseTest):
     """Test that without task_db_path, everything always runs (no caching)."""

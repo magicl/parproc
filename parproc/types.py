@@ -89,10 +89,13 @@ class Output:
         max_age: Optional freshness requirement. If set, the output file must be
             newer than ``now - max_age`` when checking staleness and output
             verification.
+        enforce_freshness: Whether post-run verification should fail if this
+            output remains older than ``max_age``. Defaults to ``True``.
     """
 
     file: str
     max_age: DurationSpec | None = None
+    enforce_freshness: bool = True
 
 
 _DURATION_UNITS: Final[dict[str, float]] = {

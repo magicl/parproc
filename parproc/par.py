@@ -130,6 +130,7 @@ def _flatten_names(names: list[str] | list[str | list[str]]) -> list[str]:
 class ResolvedOutput:
     path: str
     max_age_seconds: float | None
+    enforce_freshness: bool
 
 
 class ProcManager:  # pylint: disable=too-many-public-methods
@@ -999,9 +1000,21 @@ class ProcManager:  # pylint: disable=too-many-public-methods
             path = output_spec.file
             if '*' in path or '?' in path or '[' in path:
                 for resolved_path in sorted(globmod.glob(path, recursive=True)):
-                    resolved.append(ResolvedOutput(path=resolved_path, max_age_seconds=max_age_seconds))
+                    resolved.append(
+                        ResolvedOutput(
+                            path=resolved_path,
+                            max_age_seconds=max_age_seconds,
+                            enforce_freshness=output_spec.enforce_freshness,
+                        )
+                    )
             else:
-                resolved.append(ResolvedOutput(path=path, max_age_seconds=max_age_seconds))
+                resolved.append(
+                    ResolvedOutput(
+                        path=path,
+                        max_age_seconds=max_age_seconds,
+                        enforce_freshness=output_spec.enforce_freshness,
+                    )
+                )
         return resolved
 
     def _compute_fingerprint(self, paths: list[str], ignored_paths: list[str] | None = None) -> dict[str, float]:
@@ -1097,6 +1110,8 @@ class ProcManager:  # pylint: disable=too-many-public-methods
                 missing.append(out_path)
                 continue
             if output.max_age_seconds is None:
+                continue
+            if not output.enforce_freshness:
                 continue
             mtime_ns = self._file_watcher.path_mtime_ns(out_path, refresh=True)
             if mtime_ns is None:
@@ -2391,6 +2406,11 @@ class Proto:
                         raise UserError('Output.file must be a non-empty string.')
                     if spec.max_age is not None:
                         parse_duration_spec(spec.max_age, label='Output.max_age')
+                    if not isinstance(spec.enforce_freshness, bool):
+                        raise UserError(
+                            'Output.enforce_freshness must be a bool, '
+                            f'got {type(spec.enforce_freshness).__name__!r}.'
+                        )
                     continue
                 raise UserError(
                     'Proto outputs must contain str, Output, or callable values, ' f'got {type(spec).__name__!r}.'

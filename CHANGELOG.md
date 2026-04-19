@@ -3,6 +3,16 @@
 All notable user-facing changes to parproc will be documented in this file.
 
 
+## [0.6.9]
+
+### Added
+- Added `pp.Output(..., enforce_freshness=False)` to allow post-run output verification to accept existing outputs that were not re-touched by a no-op tool run.
+- Added `examples/outputs_not_refreshed_error.py` to intentionally trigger and preview output-refresh failures.
+
+### Changed
+- Terminal output for `ERROR_OUTPUTS_NOT_REFRESHED` now prints each affected output path on its own indented line directly under the failed task.
+
+
 ## [0.6.8]
 
 ### Changed

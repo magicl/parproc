@@ -367,7 +367,7 @@ def build(ctx: pp.ProcContext, target: str) -> dict:
 
 - **`inputs`** -- file paths, glob patterns, or callables that return lists of paths. Used for staleness detection: if any input file is newer than the cached result, the proc re-runs. Glob patterns (e.g. `src/**/*.ts`) are expanded at check time.
 - **`outputs`** -- file paths (strings), `pp.Output(...)` specs, or callables returning either. After a proc runs, the framework verifies that all declared output files exist. If any are missing, the proc is marked **FAILED** with error `ERROR_OUTPUTS_NOT_REFRESHED`.
-- **`pp.Output(file=..., max_age=...)`** -- per-output policy. `max_age` is optional; when set, the output must be newer than `now - max_age` (during incremental stale checks and post-run verification). `max_age` accepts seconds (`int`/`float`), `datetime.timedelta`, or strings like `4s`, `4m`, `4h`, `4d`, `4 seconds`, `4 minutes`, `4 days`.
+- **`pp.Output(file=..., max_age=..., enforce_freshness=...)`** -- per-output policy. `max_age` is optional; when set, the output must be newer than `now - max_age` during incremental stale checks. Post-run, this freshness check is enforced when `enforce_freshness=True` (default). Set `enforce_freshness=False` when the tool may legitimately no-op and leave an existing output file older than `max_age`. `max_age` accepts seconds (`int`/`float`), `datetime.timedelta`, or strings like `4s`, `4m`, `4h`, `4d`, `4 seconds`, `4 minutes`, `4 days`.
 
 Both accept a list of strings, a single callable, or a list mixing strings and callables. Callables receive the same `DepProcContext` and keyword args as dependency lambdas.
 
