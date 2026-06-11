@@ -27,6 +27,7 @@ except ImportError:
     pass
 
 from . import task_db
+from .imports import PythonImportResolver
 from .proc import Proc, ProcContext
 from .runner import MultiProcessRunner, SingleProcessRunner
 from .term import TermDynamic, TermSimple
@@ -156,6 +157,9 @@ class ProcManager:  # pylint: disable=too-many-public-methods
         self.task_db_path: str | None = None
         self.name_param_separator = '::'
         self.global_inputs_ignore: list[FileSpec] | None = None
+        self.track_python_imports = False
+        self.python_import_roots: list[str] | None = None
+        self._import_resolver: PythonImportResolver | None = None
         self.watch = False
         self.watch_debounce_seconds = 0.3
         self._full: bool = False
@@ -177,6 +181,9 @@ class ProcManager:  # pylint: disable=too-many-public-methods
         self.missing_deps: dict[str, bool] = {}
         self.allow_missing_deps = True
         self.global_inputs_ignore = None
+        self.track_python_imports = False
+        self.python_import_roots = None
+        self._import_resolver = None
         self.watch = False
         self.watch_debounce_seconds = 0.3
         self.pending_now = []  # Procs with now=True to be started on next _step
@@ -220,6 +227,8 @@ class ProcManager:  # pylint: disable=too-many-public-methods
         watch: bool | None = None,  # pylint: disable=redefined-outer-name
         watch_debounce_seconds: float | None = None,
         full_log_on_failure: bool | None = None,
+        track_python_imports: bool | None = None,
+        python_import_roots: Sequence[str] | None = None,
     ) -> None:
         """
         parallel: Number of parallel running processes
@@ -235,6 +244,12 @@ class ProcManager:  # pylint: disable=too-many-public-methods
         watch_debounce_seconds: Debounce quiet period used in watch mode to coalesce bursty changes (default: 0.3).
           Set to 0 to disable debouncing.
         full_log_on_failure: If True, show complete task log output for failed procs instead of extracted snippets.
+        track_python_imports: If True, when a proc declares a ``.py`` file as an input, the first-party
+          Python files it imports (transitively) are also treated as inputs for staleness/watch purposes.
+          Only files under ``python_import_roots`` are followed; stdlib/site-packages/third-party are ignored.
+          Individual procs/protos may override this with ``track_imports=``. Default: False.
+        python_import_roots: Directories that define "first-party" code for ``track_python_imports``.
+          Defaults to the current working directory when unset.
         """
         if parallel is not None:
             self.parallel = parallel
@@ -289,6 +304,18 @@ class ProcManager:  # pylint: disable=too-many-public-methods
         if full_log_on_failure is not None:
             self.full_log_on_failure = full_log_on_failure
             self._apply_term_options()
+        if track_python_imports is not None:
+            self.track_python_imports = track_python_imports
+            self._import_resolver = None
+        if python_import_roots is not None:
+            roots_list = list(python_import_roots)
+            for root in roots_list:
+                if not isinstance(root, str):
+                    raise UserError(
+                        f'python_import_roots must contain str values, got {type(root).__name__!r}.'
+                    )
+            self.python_import_roots = roots_list
+            self._import_resolver = None
 
     def set_params(self, **params: Any) -> None:
         for k, v in params.items():
@@ -858,11 +885,41 @@ class ProcManager:  # pylint: disable=too-many-public-methods
             kept.append(path)
         return kept
 
+    def _should_track_imports(self, proc: 'Proc') -> bool:
+        """Whether transitive Python import tracking applies to this proc."""
+        if proc.track_imports is not None:
+            return proc.track_imports
+        return self.track_python_imports
+
+    def _get_import_resolver(self) -> PythonImportResolver:
+        """Return a PythonImportResolver for the configured roots, rebuilding if roots changed."""
+        roots = self.python_import_roots if self.python_import_roots is not None else [os.getcwd()]
+        normalized = [os.path.abspath(r) for r in roots]
+        if self._import_resolver is None or self._import_resolver.roots != normalized:
+            self._import_resolver = PythonImportResolver(roots)
+        return self._import_resolver
+
+    def _expand_python_imports(self, paths: list[str]) -> list[str]:
+        """Append first-party Python files transitively imported by any ``.py`` path."""
+        resolver = self._get_import_resolver()
+        result = list(paths)
+        seen = {os.path.abspath(p) for p in paths}
+        for path in paths:
+            if not path.endswith('.py'):
+                continue
+            for dep in resolver.transitive_deps(path):
+                if dep not in seen:
+                    seen.add(dep)
+                    result.append(dep)
+        return result
+
     def _resolve_inputs(self, proc: 'Proc') -> list[str]:
         """Resolve input globs/callables to concrete file paths."""
         if proc.inputs is None:
             return []
         resolved = self._resolve_file_specs(proc.inputs, proc)
+        if self._should_track_imports(proc):
+            resolved = self._expand_python_imports(resolved)
         effective_ignore_specs = self._effective_inputs_ignore_specs(proc)
         if effective_ignore_specs is None:
             return resolved
@@ -931,6 +988,11 @@ class ProcManager:  # pylint: disable=too-many-public-methods
         if proc.inputs is None:
             return [], [], []
         watch_paths = self._resolve_watch_specs(proc.inputs, proc)
+        if self._should_track_imports(proc):
+            concrete_inputs = self._resolve_file_specs(proc.inputs, proc)
+            for dep in self._expand_python_imports(concrete_inputs):
+                if dep not in concrete_inputs and dep not in watch_paths:
+                    watch_paths.append(dep)
         effective_ignore_specs = self._effective_inputs_ignore_specs(proc)
         if effective_ignore_specs is None:
             return watch_paths, [], []
@@ -1667,6 +1729,7 @@ class ProcManager:  # pylint: disable=too-many-public-methods
             outputs=proto.outputs,
             log_ignore=proto.log_ignore,
             no_skip=proto.no_skip,
+            track_imports=proto.track_imports,
         )
         proc(proto.func)
         return proc_name
@@ -2346,6 +2409,7 @@ class Proto:
         outputs: Sequence[OutputSpec] | Callable[..., list[OutputFile]] | None = None,
         log_ignore: list[str | LogIssueRule] | str | LogIssueRule | None = None,
         no_skip: bool = False,
+        track_imports: bool | None = None,
     ) -> None:
         # Input properties
         self.name = name
@@ -2436,6 +2500,9 @@ class Proto:
         self.outputs = normalized_outputs
         self.log_ignore = normalized_log_ignore
         self.no_skip = no_skip
+        if track_imports is not None and not isinstance(track_imports, bool):
+            raise UserError(f'Proto track_imports must be a bool or None, got {type(track_imports).__name__!r}.')
+        self.track_imports = track_imports
 
         # Initialize regex attributes (will be set in _build_regex_pattern)
         self.regex_pattern: re.Pattern[str] | None = None
@@ -2724,6 +2791,8 @@ def set_options(
     watch: bool | None = None,  # pylint: disable=redefined-outer-name
     watch_debounce_seconds: float | None = None,
     full_log_on_failure: bool | None = None,
+    track_python_imports: bool | None = None,
+    python_import_roots: Sequence[str] | None = None,
 ) -> None:
     ProcManager.get_inst().set_options(
         parallel=parallel,
@@ -2737,6 +2806,8 @@ def set_options(
         watch=watch,
         watch_debounce_seconds=watch_debounce_seconds,
         full_log_on_failure=full_log_on_failure,
+        track_python_imports=track_python_imports,
+        python_import_roots=python_import_roots,
     )
 
 

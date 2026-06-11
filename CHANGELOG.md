@@ -3,6 +3,17 @@
 All notable user-facing changes to parproc will be documented in this file.
 
 
+## [0.7.0]
+
+### Added
+- New `track_python_imports` option on `set_options(...)` to automatically follow `import` statements of `.py` inputs and treat the first-party modules they import (transitively) as additional inputs for staleness and watch mode.
+- New `python_import_roots` option on `set_options(...)` to define which directories count as first-party for import tracking (defaults to the current working directory). Standard library, `site-packages`, and other third-party packages are ignored.
+- New per-proc `track_imports=` argument on `Proc`/`Proto` to opt individual tasks in or out of import tracking regardless of the global setting.
+
+### Changed
+- Transitively imported Python files honor `inputs_ignore` / `global_inputs_ignore`, so specific files can still be excluded from tracking.
+
+
 ## [0.6.9]
 
 ### Added

@@ -109,6 +109,9 @@ class Proc:
     name   - identified name of process
     deps   - process dependencies (proc names and/or SpecialDep). will not be run until these are satisfied
     locks  - list of locks. only one process can own a lock at any given time
+    track_imports - override the global track_python_imports option for this proc. When True (or the
+        global option is on), first-party Python files imported by any ``.py`` input are followed
+        transitively and treated as inputs. None means inherit the global option.
     """
 
     # Set by par on load so Proc never imports par (avoids circular import).
@@ -153,6 +156,7 @@ class Proc:
         outputs: Sequence[OutputFileSpec] | Callable[..., list[str | Output]] | None = None,
         log_ignore: list[str | LogIssueRule] | str | LogIssueRule | None = None,
         no_skip: bool = False,
+        track_imports: bool | None = None,
     ) -> None:
         self.deps: list[str]
         self.special_deps: list[SpecialDep]
@@ -229,6 +233,9 @@ class Proc:
         self.outputs = normalized_outputs
         self.log_ignore = normalized_log_ignore
         self.no_skip = no_skip
+        if track_imports is not None and not isinstance(track_imports, bool):
+            raise UserError(f'Proc track_imports must be a bool or None, got {type(track_imports).__name__!r}.')
+        self.track_imports = track_imports
         self.log_filename = ''
         import uuid  # pylint: disable=import-outside-toplevel
 

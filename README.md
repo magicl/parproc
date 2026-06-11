@@ -310,6 +310,8 @@ pp.set_options(
     allow_missing_deps=True,      # don't error on deps that don't exist yet
     full_log_on_failure=True,     # show complete log output for failed procs
     task_db_path='build/.parproc.db',  # SQLite DB for run history and result cache
+    track_python_imports=False,   # follow imports of .py inputs as transitive inputs
+    python_import_roots=None,     # first-party roots for import tracking (default: cwd)
 )
 ```
 
@@ -370,6 +372,24 @@ def build(ctx: pp.ProcContext, target: str) -> dict:
 - **`pp.Output(file=..., max_age=..., enforce_freshness=...)`** -- per-output policy. `max_age` is optional; when set, the output must be newer than `now - max_age` during incremental stale checks. Post-run, this freshness check is enforced when `enforce_freshness=True` (default). Set `enforce_freshness=False` when the tool may legitimately no-op and leave an existing output file older than `max_age`. `max_age` accepts seconds (`int`/`float`), `datetime.timedelta`, or strings like `4s`, `4m`, `4h`, `4d`, `4 seconds`, `4 minutes`, `4 days`.
 
 Both accept a list of strings, a single callable, or a list mixing strings and callables. Callables receive the same `DepProcContext` and keyword args as dependency lambdas.
+
+### Following Python imports
+
+When a proc declares a `.py` file as an input, the files that module *imports* are part of its real input set too -- but listing them all by hand is tedious and error-prone. Enable `track_python_imports` to have parproc follow `import` statements automatically:
+
+```python
+pp.set_options(task_db_path='.cache/pp.db', track_python_imports=True)
+
+@pp.Proto(name='codegen', inputs=['scripts/codegen.py'])
+def codegen(ctx: pp.ProcContext) -> None:
+    ...  # re-runs when codegen.py OR any first-party module it imports changes
+```
+
+- **What gets followed.** Imports are resolved statically (via `ast`) and followed transitively. Only **first-party** files -- those located under `python_import_roots` (defaults to the current working directory) -- are tracked. The standard library, `site-packages`, and other third-party packages are ignored.
+- **Scope control.** Set `python_import_roots=[...]` to define what counts as first-party. Pulled-in files honor `inputs_ignore` / `global_inputs_ignore`, so you can still exclude specific files.
+- **Per-proc override.** Pass `track_imports=True` / `track_imports=False` on an individual `Proc`/`Proto` to opt in or out regardless of the global setting.
+- **Watch mode.** The same expansion feeds watch mode, so editing an imported module re-triggers the proc.
+- **Limitation.** Only statically-visible imports are detected. Dynamic imports (`importlib.import_module(...)`, `__import__(...)`) are not followed -- declare those files explicitly via `inputs`.
 
 ### Incremental run vs full run
 
