@@ -37,9 +37,11 @@ class PythonImportResolver:
         self._direct_cache: dict[str, tuple[int, list[str]]] = {}
         # Installation/venv prefixes whose contents are never treated as first-party.
         self._excluded_prefixes: list[str] = []
-        for prefix in {sys.prefix, sys.base_prefix, sys.exec_prefix}:
+        for prefix in (sys.prefix, sys.base_prefix, sys.exec_prefix):
             if prefix:
-                self._excluded_prefixes.append(os.path.abspath(prefix))
+                abs_prefix = os.path.abspath(prefix)
+                if abs_prefix not in self._excluded_prefixes:
+                    self._excluded_prefixes.append(abs_prefix)
 
     def transitive_deps(self, path: str) -> list[str]:
         """Return sorted first-party ``.py`` files transitively imported by ``path``.

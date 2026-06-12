@@ -140,9 +140,9 @@ line 3"""
         self.assertIn('STDERR:', output)
 
     def test_parse_outputs_not_refreshed_paths(self):
-        more_info = 'outputs not refreshed: /tmp/a.txt, /tmp/b.txt'
-        self.assertEqual(_parse_outputs_refresh_paths(more_info), ['/tmp/a.txt', '/tmp/b.txt'])
+        more_info = 'outputs not refreshed: /tmp/a.txt, /tmp/b.txt'  # nosec B108
+        self.assertEqual(_parse_outputs_refresh_paths(more_info), ['/tmp/a.txt', '/tmp/b.txt'])  # nosec B108
 
     def test_parse_outputs_older_than_max_age_paths(self):
-        more_info = 'outputs older than max_age: /tmp/c.txt'
-        self.assertEqual(_parse_outputs_refresh_paths(more_info), ['/tmp/c.txt'])
+        more_info = 'outputs older than max_age: /tmp/c.txt'  # nosec B108
+        self.assertEqual(_parse_outputs_refresh_paths(more_info), ['/tmp/c.txt'])  # nosec B108

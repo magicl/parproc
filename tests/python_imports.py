@@ -116,14 +116,17 @@ class TestResolver(ImportFixtureMixin):
 class ManagerIntegrationBase(ImportFixtureMixin):
     """Base for tests exercising input expansion through ProcManager."""
 
-    def _set_options(self, **extra: object) -> None:
+    def setUp(self) -> None:
+        super().setUp()
         self._db_path = os.path.join(self._tmpdir, 'test.db')
+
+    def _set_options(self, track_python_imports: bool = False) -> None:
         pp.set_options(
             mode=_test_mode(),
             dynamic=False,
             task_db_path=self._db_path,
             python_import_roots=[self._tmpdir],
-            **extra,
+            track_python_imports=track_python_imports,
         )
 
 

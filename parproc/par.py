@@ -311,9 +311,7 @@ class ProcManager:  # pylint: disable=too-many-public-methods
             roots_list = list(python_import_roots)
             for root in roots_list:
                 if not isinstance(root, str):
-                    raise UserError(
-                        f'python_import_roots must contain str values, got {type(root).__name__!r}.'
-                    )
+                    raise UserError(f'python_import_roots must contain str values, got {type(root).__name__!r}.')
             self.python_import_roots = roots_list
             self._import_resolver = None
 

@@ -52,7 +52,7 @@ repos:
     args: ['--disable=line-too-long,missing-module-docstring,missing-function-docstring,missing-class-docstring,logging-fstring-interpolation,too-many-arguments,too-few-public-methods,too-many-branches,too-many-statements,too-many-instance-attributes,duplicate-code,import-error']
 
 - repo: https://github.com/asottile/pyupgrade
-  rev: v3.20.0
+  rev: v3.21.2
   hooks:
   - id: pyupgrade
     args: ['--py312-plus']

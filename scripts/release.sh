@@ -31,6 +31,15 @@ require_clean_git_state() {
   fi
 }
 
+run_quality_gate() {
+  # Block the release unless all pre-commit hooks and the full test suite pass.
+  echo "Running pre-commit hooks (lint, mypy, formatting, etc.)..."
+  uv run pre-commit run --all-files
+
+  echo "Running test suite..."
+  bash scripts/test.sh
+}
+
 get_project_version() {
   uv run python - <<'PY'
 import tomllib
@@ -117,6 +126,7 @@ upload_release() {
 }
 
 require_clean_git_state
+run_quality_gate
 verify_changelog_newer_than_last_tag
 
 # Remove any prior builds
