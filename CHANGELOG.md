@@ -3,6 +3,12 @@
 All notable user-facing changes to parproc will be documented in this file.
 
 
+## [0.7.1]
+
+### Fixed
+- Console log snippet extraction now matches warning/error keywords as whole words only, so identifiers like `_warning` no longer trigger false-positive log panels.
+
+
 ## [0.7.0]
 
 ### Added

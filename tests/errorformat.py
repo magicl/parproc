@@ -79,6 +79,31 @@ line 4"""
         self.assertEqual(len(chunks), 1)
         self.assertEqual(output, error_msg)
 
+    def test_keyword_not_matched_inside_identifiers(self):
+        """Keywords embedded in identifiers (e.g. _warning) should not trigger extraction."""
+        log_text = """line 1
+some_var_with_warning = True
+line 3
+line 4"""
+        chunks = Term.extract_error_log(log_text, task_failed=False)
+        self.assertEqual(chunks, [])
+
+    def test_keyword_matched_as_standalone_word(self):
+        """Keywords should match when delimited by whitespace, punctuation, or line boundaries."""
+        cases = [
+            "+warning",
+            "warning",
+            "warning: something bad",
+            "something bad: warning",
+        ]
+        for match_line in cases:
+            with self.subTest(match_line=match_line):
+                log_text = f"line 1\n{match_line}\nline 3"
+                chunks = Term.extract_error_log(log_text, task_failed=False)
+                self.assertGreater(len(chunks), 0, msg=f"expected match for {match_line!r}")
+                output = '\n'.join(chunk.content for chunk in chunks)
+                self.assertIn(match_line, output)
+
     def test_log_ignore_always_filters_keyword_lines(self):
         """Always-ignore rules remove matching warning/error lines from extracted snippets."""
         error_msg = """line 1

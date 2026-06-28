@@ -55,6 +55,13 @@ class Displayable:
 # Match ANSI SGR sequences (e.g. \x1b[31m or \033[1;31m)
 _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[;\d]*[A-Za-z]")
 
+# Log issue keywords: whole-word only (so e.g. _warning does not match "warning")
+_LOG_KEYWORDS = ('exception', 'error', 'warning', 'notice', 'deprecated', 'deprecation')
+_LOG_KEYWORD_RE = re.compile(
+    r'\b(?:' + '|'.join(re.escape(keyword) for keyword in _LOG_KEYWORDS) + r')\b',
+    re.IGNORECASE,
+)
+
 
 def _has_ansi_color(text: str) -> bool:
     """Return True if text contains ANSI color/formatting escape sequences."""
@@ -383,24 +390,21 @@ class Term:
                     # For parser matches, we'll use the full range since we matched the whole text
                     return [LogChunk(content=content, start_line=1, end_line=total_lines)]
 
-        # Search for keywords in the log (convert to lowercase for matching)
-        keywords = ['exception', 'error', 'warning', 'notice', 'deprecated', 'deprecation']
         visible_lines = [
             (line_idx, line)
             for line_idx, line in enumerate(lines, start=1)
             if not Term._line_is_ignored(line, ignore_patterns)
         ]
 
-        # Find line numbers where keywords appear
+        # Find line numbers where keywords appear as whole words
         cutout_ranges: list[tuple[int, int]] = []  # List of (start_line, end_line) ranges
 
-        for keyword in keywords:
-            for line_idx, line in visible_lines:
-                if keyword in line.lower():
-                    # Add range: line number ± context_lines
-                    start = max(1, line_idx - Term.context_lines)
-                    end = min(total_lines, line_idx + Term.context_lines)
-                    cutout_ranges.append((start, end))
+        for line_idx, line in visible_lines:
+            if _LOG_KEYWORD_RE.search(line):
+                # Add range: line number ± context_lines
+                start = max(1, line_idx - Term.context_lines)
+                end = min(total_lines, line_idx + Term.context_lines)
+                cutout_ranges.append((start, end))
 
         # Merge overlapping ranges
         if cutout_ranges:
